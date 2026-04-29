@@ -264,31 +264,42 @@ export default function ChatPage() {
     return messages.filter(m => m.content.toLowerCase().includes(q));
   }, [messages, searchQuery]);
 
-  // ── BRANCH ARROWS for last assistant message ──
-  function BranchArrows() {
-    if (!activeBranch) return null;
-    const forkIdx = activeBranch.fork_message_index;
-    const siblings = allBranches.filter(b =>
-      b.fork_message_index === forkIdx && b.parent_branch_id === activeBranch.parent_branch_id
+  // ── BRANCH SIBLINGS ──
+  const siblings = React.useMemo(() => {
+    if (!activeBranch) return [];
+    const same = allBranches.filter(b =>
+      b.parent_branch_id === activeBranch.parent_branch_id &&
+      b.fork_message_index === activeBranch.fork_message_index
     );
-    if (siblings.length <= 1) return null;
+    if (activeBranch.parent_branch_id) {
+      const parent = allBranches.find(b => b.id === activeBranch.parent_branch_id);
+      if (parent && !same.find(b => b.id === parent.id)) {
+        return [parent, ...same];
+      }
+    }
+    return same;
+  }, [activeBranch, allBranches]);
+
+  function BranchArrows() {
+    if (!activeBranch || siblings.length <= 1) return null;
     const idx = siblings.findIndex(b => b.id === activeBranch.id);
     return (
       <div style={{
-        display: "flex", alignItems: "center", gap: 8, justifyContent: "center",
-        padding: "6px 0 2px",
+        display: "flex", alignItems: "center", gap: 8,
+        padding: "4px 0 8px", marginLeft: 4,
       }}>
-        <button className="btn-icon" disabled={idx === 0}
+        <button className="btn-icon" disabled={idx <= 0}
           onClick={() => switchBranch(siblings[idx - 1])}>
-          <ArrowL size={16} style={{ opacity: idx === 0 ? 0.3 : 1 }} />
+          <ArrowL size={15} style={{ opacity: idx <= 0 ? 0.25 : 1 }} />
         </button>
         <span style={{ fontSize: 12, fontFamily: "var(--mono)", color: "var(--text3)" }}>
           {idx + 1} / {siblings.length}
         </span>
-        <button className="btn-icon" disabled={idx === siblings.length - 1}
+        <button className="btn-icon" disabled={idx >= siblings.length - 1}
           onClick={() => switchBranch(siblings[idx + 1])}>
-          <ArrowR size={16} style={{ opacity: idx === siblings.length - 1 ? 0.3 : 1 }} />
+          <ArrowR size={15} style={{ opacity: idx >= siblings.length - 1 ? 0.25 : 1 }} />
         </button>
+        <span style={{ fontSize: 11, fontFamily: "var(--mono)", color: "var(--text3)" }}>versions</span>
       </div>
     );
   }
