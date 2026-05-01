@@ -34,6 +34,54 @@ function visibleMessages(branch) {
   return branch.history.filter(m => m.role === "user" || m.role === "assistant");
 }
 
+// ── BRANCH FORK MAP ───────────────────────────────────────────────────────────
+// For each assistant message index in the active branch's visible history,
+// find all branches that share the same history up to that point but differ at it.
+// Returns: Map<visibleMsgIndex, branch[]>
+// Only includes entries where there are 2+ options (i.e. a real fork exists).
+function buildForkMap(activeBranch, allBranches) {
+  const forkMap = new Map();
+  if (!activeBranch || allBranches.length <= 1) return forkMap;
+
+  const activeVisible = visibleMessages(activeBranch);
+
+  // For every assistant message in the active branch
+  activeVisible.forEach((msg, visIdx) => {
+    if (msg.role !== "assistant") return;
+
+    // The assistant message at visIdx corresponds to what position in full history?
+    // We need to find branches that diverge exactly here.
+    // A branch diverges here if:
+    // 1. It shares the same user message just before this assistant message
+    // 2. But has a different assistant reply at this position
+
+    // Get the user message just before this assistant reply
+    const userMsgBefore = visIdx > 0 ? activeVisible[visIdx - 1] : null;
+
+    // Find all branches where their visible messages up to visIdx-1 match,
+    // meaning they share the same conversation up to the user message,
+    // but may differ at this assistant reply
+    const forks = allBranches.filter(b => {
+      if (b.id === activeBranch.id) return true; // always include self
+      const bVisible = visibleMessages(b);
+      if (bVisible.length <= visIdx) return false;
+
+      // Check that all messages before this point match
+      for (let i = 0; i < visIdx; i++) {
+        if (!bVisible[i] || bVisible[i].content !== activeVisible[i].content) return false;
+      }
+      // And that the assistant reply at this position exists (may differ)
+      return bVisible[visIdx] && bVisible[visIdx].role === "assistant";
+    });
+
+    if (forks.length >= 2) {
+      forkMap.set(visIdx, forks);
+    }
+  });
+
+  return forkMap;
+}
+
 export default function ChatPage() {
   const { chatId } = useParams();
   const nav = useNavigate();
@@ -80,7 +128,6 @@ export default function ChatPage() {
 
   useEffect(() => {
     loadChat().then(() => {
-      // Set isFirstTurn after initial load
       setActiveBranch(prev => {
         if (prev) {
           const hasReplies = prev.history.filter(m => m.role === "assistant").length > 0;
@@ -228,52 +275,21 @@ export default function ChatPage() {
     inputRef.current?.focus();
   }
 
-  // ── MESSAGES ──
+  // ── MESSAGES + FORK MAP ──
   const messages = useMemo(() => {
     if (!activeBranch) return [];
     return visibleMessages(activeBranch);
   }, [activeBranch]);
+
+  const forkMap = useMemo(() => {
+    return buildForkMap(activeBranch, allBranches);
+  }, [activeBranch, allBranches]);
 
   const filteredMessages = useMemo(() => {
     if (!searchQuery.trim()) return messages;
     const q = searchQuery.toLowerCase();
     return messages.filter(m => m.content.toLowerCase().includes(q));
   }, [messages, searchQuery]);
-
-  // ── BRANCH SIBLINGS ──
-  const siblings = useMemo(() => {
-    if (!activeBranch) return [];
-    const same = allBranches.filter(b =>
-      b.parent_branch_id === activeBranch.parent_branch_id &&
-      b.fork_message_index === activeBranch.fork_message_index
-    );
-    if (activeBranch.parent_branch_id) {
-      const parent = allBranches.find(b => b.id === activeBranch.parent_branch_id);
-      if (parent && !same.find(b => b.id === parent.id)) {
-        return [parent, ...same];
-      }
-    }
-    return same;
-  }, [activeBranch, allBranches]);
-
-  function BranchArrows() {
-    if (!activeBranch || siblings.length <= 1) return null;
-    const idx = siblings.findIndex(b => b.id === activeBranch.id);
-    return (
-      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 0 8px", marginLeft: 4 }}>
-        <button className="btn-icon" disabled={idx <= 0} onClick={() => switchBranch(siblings[idx - 1])}>
-          <ArrowL size={15} style={{ opacity: idx <= 0 ? 0.25 : 1 }} />
-        </button>
-        <span style={{ fontSize: 12, fontFamily: "var(--mono)", color: "var(--text3)" }}>
-          {idx + 1} / {siblings.length}
-        </span>
-        <button className="btn-icon" disabled={idx >= siblings.length - 1} onClick={() => switchBranch(siblings[idx + 1])}>
-          <ArrowR size={15} style={{ opacity: idx >= siblings.length - 1 ? 0.25 : 1 }} />
-        </button>
-        <span style={{ fontSize: 11, fontFamily: "var(--mono)", color: "var(--text3)" }}>versions</span>
-      </div>
-    );
-  }
 
   if (!chat || !activeBranch) {
     return (
@@ -282,6 +298,8 @@ export default function ChatPage() {
       </div>
     );
   }
+
+  const displayMessages = sheet === "search" ? filteredMessages : messages;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100dvh", background: "var(--bg)" }}>
@@ -307,9 +325,23 @@ export default function ChatPage() {
 
       {/* ── MESSAGES ── */}
       <div style={{ flex: 1, overflowY: "auto", padding: "12px 12px 4px" }}>
-        {(sheet === "search" ? filteredMessages : messages).map((msg, i) => (
-          <MessageBubble key={i} msg={msg} fontSize={fontSz} />
-        ))}
+        {displayMessages.map((msg, i) => {
+          // Only show fork arrows on assistant messages that have actual forks
+          const forks = msg.role === "assistant" ? forkMap.get(i) : null;
+          return (
+            <React.Fragment key={i}>
+              <MessageBubble msg={msg} fontSize={fontSz} />
+              {forks && (
+                <InlineBranchArrows
+                  forks={forks}
+                  activeBranch={activeBranch}
+                  msgIndex={i}
+                  onSwitch={(branch) => switchBranch(branch)}
+                />
+              )}
+            </React.Fragment>
+          );
+        })}
 
         {streaming && streamText && (
           <MessageBubble msg={{ role: "assistant", content: streamText }} fontSize={fontSz} isStreaming />
@@ -325,7 +357,6 @@ export default function ChatPage() {
           </div>
         )}
 
-        <BranchArrows />
         <div ref={bottomRef} style={{ height: 8 }} />
       </div>
 
@@ -480,6 +511,50 @@ export default function ChatPage() {
   );
 }
 
+// ── INLINE BRANCH ARROWS ──────────────────────────────────────────────────────
+// Renders arrows directly under the forked assistant message.
+// forks = array of branches that all have a reply at this message index.
+// The "current" version is whichever branch's reply matches activeBranch at this index.
+function InlineBranchArrows({ forks, activeBranch, msgIndex, onSwitch }) {
+  const activeVisible = visibleMessages(activeBranch);
+  const activeContent = activeVisible[msgIndex]?.content;
+
+  // Find which fork index is currently active
+  const currentIdx = forks.findIndex(b => {
+    const bVisible = visibleMessages(b);
+    return bVisible[msgIndex]?.content === activeContent;
+  });
+
+  const idx = currentIdx === -1 ? 0 : currentIdx;
+
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", gap: 6,
+      padding: "2px 0 10px", marginLeft: 4,
+    }}>
+      <button
+        className="btn-icon"
+        disabled={idx <= 0}
+        onClick={() => onSwitch(forks[idx - 1])}
+      >
+        <ArrowL size={14} style={{ opacity: idx <= 0 ? 0.25 : 1 }} />
+      </button>
+      <span style={{ fontSize: 11, fontFamily: "var(--mono)", color: "var(--text3)" }}>
+        {idx + 1} / {forks.length}
+      </span>
+      <button
+        className="btn-icon"
+        disabled={idx >= forks.length - 1}
+        onClick={() => onSwitch(forks[idx + 1])}
+      >
+        <ArrowR size={14} style={{ opacity: idx >= forks.length - 1 ? 0.25 : 1 }} />
+      </button>
+      <span style={{ fontSize: 11, fontFamily: "var(--mono)", color: "var(--text3)" }}>versions</span>
+    </div>
+  );
+}
+
+// ── MESSAGE BUBBLE ────────────────────────────────────────────────────────────
 function MessageBubble({ msg, fontSize, isStreaming }) {
   const isUser = msg.role === "user";
   return (
@@ -502,6 +577,7 @@ function MessageBubble({ msg, fontSize, isStreaming }) {
   );
 }
 
+// ── TOOLBAR BUTTON ────────────────────────────────────────────────────────────
 function ToolBtn({ icon, label, onClick, disabled }) {
   return (
     <button onClick={onClick} disabled={disabled} style={{
