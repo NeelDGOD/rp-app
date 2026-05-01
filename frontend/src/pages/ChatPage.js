@@ -5,13 +5,12 @@ import { useParams, useNavigate } from "react-router-dom";
 import {
   ChevronLeft, RotateCcw, Undo2, Bookmark, BookmarkCheck,
   ChevronLeft as ArrowL, ChevronRight as ArrowR,
-  Sparkles, Brain, Search, X, Send, Zap
+  Sparkles, Brain, Search, X, Send
 } from "lucide-react";
 import { api } from "../lib/api";
 import BottomSheet from "../components/BottomSheet";
 import { useToast } from "../components/Toast";
 
-// ── COMMANDS REFERENCE ────────────────────────────────────────────────────────
 const COMMANDS_REF = `GENERAL
   retry              re-generate last reply
   retry [hint]       re-generate with direction
@@ -31,46 +30,27 @@ CHAT
 
 TYPE /commands anytime to see this again`;
 
-// ── HELPERS ───────────────────────────────────────────────────────────────────
-function buildTree(branches) {
-  // Returns map: fork_message_index → [branch, ...]
-  // For the root (index 0) there's one root branch
-  const byParent = {};
-  for (const b of branches) {
-    const key = b.parent_branch_id || "root";
-    if (!byParent[key]) byParent[key] = [];
-    byParent[key].push(b);
-  }
-  return byParent;
-}
-
 function visibleMessages(branch) {
-  // Returns only user/assistant messages (not system)
   return branch.history.filter(m => m.role === "user" || m.role === "assistant");
 }
 
-// ── MAIN COMPONENT ────────────────────────────────────────────────────────────
 export default function ChatPage() {
   const { chatId } = useParams();
   const nav = useNavigate();
   const toast = useToast();
 
-  const [chat, setChat]           = useState(null);
+  const [chat, setChat]                 = useState(null);
   const [activeBranch, setActiveBranch] = useState(null);
   const [allBranches, setAllBranches]   = useState([]);
-  const [streaming, setStreaming] = useState(false);
-  const [streamText, setStreamText] = useState("");
-  const [input, setInput]         = useState("");
-  const [draft, setDraft]         = useState(""); // saved draft
-  const [isFirstTurn, setIsFirstTurn] = useState(false);
-
-  // Sheets
-  const [sheet, setSheet]         = useState(null);
-  // sheet values: null | "retry" | "style" | "bookmark" | "bookmarks" | "search" | "commands"
-  const [retryHint, setRetryHint] = useState("");
+  const [streaming, setStreaming]       = useState(false);
+  const [streamText, setStreamText]     = useState("");
+  const [input, setInput]               = useState("");
+  const [isFirstTurn, setIsFirstTurn]   = useState(false);
+  const [sheet, setSheet]               = useState(null);
+  const [retryHint, setRetryHint]       = useState("");
   const [bookmarkLabel, setBookmarkLabel] = useState("");
-  const [bookmarks, setBookmarks] = useState([]);
-  const [searchQuery, setSearchQuery] = useState("");
+  const [bookmarks, setBookmarks]       = useState([]);
+  const [searchQuery, setSearchQuery]   = useState("");
 
   const bottomRef = useRef(null);
   const inputRef  = useRef(null);
@@ -82,39 +62,42 @@ export default function ChatPage() {
     try {
       const data = await api.getChat(chatId);
       setChat(data);
-      setAllBranches(data.branches);
-      // Active branch = most recently updated
-      const sorted = [...data.branches].sort((a,b) => b.updated_at > a.updated_at ? 1 : -1);
-      const active = sorted[0];
-      setActiveBranch(active);
-      setIsFirstTurn(active.history.filter(m => m.role === "assistant").length > 0);
-      // Restore draft
+      const branches = data.branches || [];
+      setAllBranches(branches);
+      if (branches.length === 0) return;
+      setActiveBranch(prev => {
+        if (prev) {
+          const stillExists = branches.find(b => b.id === prev.id);
+          if (stillExists) return stillExists;
+        }
+        const sorted = [...branches].sort((a, b) => b.updated_at > a.updated_at ? 1 : -1);
+        return sorted[0];
+      });
       const saved = sessionStorage.getItem(`draft_${chatId}`);
       if (saved) setInput(saved);
     } catch (e) { toast(e.message, "error"); }
   }, [chatId]);
 
-  useEffect(() => { loadChat(); }, [loadChat]);
+  useEffect(() => {
+    loadChat().then(() => {
+      // Set isFirstTurn after initial load
+      setActiveBranch(prev => {
+        if (prev) {
+          const hasReplies = prev.history.filter(m => m.role === "assistant").length > 0;
+          setIsFirstTurn(!hasReplies);
+        }
+        return prev;
+      });
+    });
+  }, [loadChat]);
 
-  // Scroll to bottom when messages change
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [activeBranch?.history, streamText]);
 
-  // Save draft to sessionStorage
   useEffect(() => {
     sessionStorage.setItem(`draft_${chatId}`, input);
   }, [input, chatId]);
-
-  // ── BRANCH NAVIGATION ──
-  // For a given message index, find sibling branches
-  function getSiblings(msgIndex) {
-    // Find all branches that forked at this message index
-    return allBranches.filter(b =>
-      b.fork_message_index === msgIndex ||
-      (msgIndex === 0 && !b.parent_branch_id)
-    );
-  }
 
   function switchBranch(branch) {
     setActiveBranch(branch);
@@ -124,43 +107,36 @@ export default function ChatPage() {
   // ── SEND ──
   async function sendMessage() {
     if (!input.trim() || streaming || !activeBranch) return;
-
     const text = input.trim();
     setInput(""); sessionStorage.removeItem(`draft_${chatId}`);
 
-    // Handle /commands
-    if (text === "/commands") {
-      setSheet("commands"); return;
-    }
+    if (text === "/commands") { setSheet("commands"); return; }
 
     setStreaming(true); setStreamText("");
 
-    const firstTurn = isFirstTurn && activeBranch.history.filter(m => m.role === "assistant").length === 0;
-
-    // Optimistically show user message
     const optimisticHistory = [
       ...activeBranch.history,
       { role: "user", content: text.replace(/{[^}]+}/g, "").trim() }
     ];
     setActiveBranch(b => ({ ...b, history: optimisticHistory }));
 
+    const branchIdAtSend = activeBranch.id;
+    const historyAtSend  = activeBranch.history;
+
     api.sendStream(
       chatId,
-      { content: text, branch_id: activeBranch.id, is_first_turn: firstTurn },
+      { content: text, branch_id: branchIdAtSend, is_first_turn: isFirstTurn },
       (delta) => setStreamText(t => t + delta),
       async (evt) => {
         setStreaming(false);
-        if (evt.needs_memory && autoMem) {
-          triggerMemoryUpdate(activeBranch.id, true);
-        }
-        await loadChat();
         setStreamText("");
         setIsFirstTurn(false);
+        if (evt.needs_memory && autoMem) triggerMemoryUpdate(branchIdAtSend, true);
+        await loadChat();
       },
       (err) => {
         setStreaming(false); setStreamText("");
-        // Roll back optimistic update
-        setActiveBranch(b => ({ ...b, history: activeBranch.history }));
+        setActiveBranch(b => ({ ...b, history: historyAtSend }));
         toast(`API error: ${err.message}`, "error", 6000);
       }
     );
@@ -171,21 +147,22 @@ export default function ChatPage() {
     if (streaming || !activeBranch) return;
     setSheet(null); setStreaming(true); setStreamText("");
 
+    const branchIdAtRetry = activeBranch.id;
+
     api.retryStream(
       chatId,
-      { branch_id: activeBranch.id, hint: retryHint },
+      { branch_id: branchIdAtRetry, hint: retryHint },
       (delta) => setStreamText(t => t + delta),
       async (evt) => {
-        setStreaming(false);
-        if (evt.needs_memory && autoMem) triggerMemoryUpdate(evt.branch_id, true);
+        setStreaming(false); setStreamText("");
         setRetryHint("");
-        await loadChat();
-        // Switch to newly created branch
+        if (evt.needs_memory && autoMem) triggerMemoryUpdate(evt.branch_id, true);
         const updated = await api.getChat(chatId);
-        setAllBranches(updated.branches);
-        const newBranch = updated.branches.find(b => b.id === evt.branch_id);
+        const branches = updated.branches || [];
+        setAllBranches(branches);
+        setChat(updated);
+        const newBranch = branches.find(b => b.id === evt.branch_id);
         if (newBranch) setActiveBranch(newBranch);
-        setStreamText("");
       },
       (err) => {
         setStreaming(false); setStreamText("");
@@ -235,16 +212,16 @@ export default function ChatPage() {
     try {
       const res = await api.restoreBookmark(bmId);
       setSheet(null);
-      await loadChat();
       const updated = await api.getChat(chatId);
-      setAllBranches(updated.branches);
-      const nb = updated.branches.find(b => b.id === res.branch_id);
+      const branches = updated.branches || [];
+      setAllBranches(branches);
+      setChat(updated);
+      const nb = branches.find(b => b.id === res.branch_id);
       if (nb) setActiveBranch(nb);
       toast("Bookmark restored", "success", 2000);
     } catch (e) { toast(e.message, "error"); }
   }
 
-  // ── STYLE INJECT ──
   function injectStyle(cmd) {
     setInput(prev => `{${cmd}} ${prev}`.trimEnd());
     setSheet(null);
@@ -257,7 +234,6 @@ export default function ChatPage() {
     return visibleMessages(activeBranch);
   }, [activeBranch]);
 
-  // Search filter
   const filteredMessages = useMemo(() => {
     if (!searchQuery.trim()) return messages;
     const q = searchQuery.toLowerCase();
@@ -265,7 +241,7 @@ export default function ChatPage() {
   }, [messages, searchQuery]);
 
   // ── BRANCH SIBLINGS ──
-  const siblings = React.useMemo(() => {
+  const siblings = useMemo(() => {
     if (!activeBranch) return [];
     const same = allBranches.filter(b =>
       b.parent_branch_id === activeBranch.parent_branch_id &&
@@ -284,19 +260,14 @@ export default function ChatPage() {
     if (!activeBranch || siblings.length <= 1) return null;
     const idx = siblings.findIndex(b => b.id === activeBranch.id);
     return (
-      <div style={{
-        display: "flex", alignItems: "center", gap: 8,
-        padding: "4px 0 8px", marginLeft: 4,
-      }}>
-        <button className="btn-icon" disabled={idx <= 0}
-          onClick={() => switchBranch(siblings[idx - 1])}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 0 8px", marginLeft: 4 }}>
+        <button className="btn-icon" disabled={idx <= 0} onClick={() => switchBranch(siblings[idx - 1])}>
           <ArrowL size={15} style={{ opacity: idx <= 0 ? 0.25 : 1 }} />
         </button>
         <span style={{ fontSize: 12, fontFamily: "var(--mono)", color: "var(--text3)" }}>
           {idx + 1} / {siblings.length}
         </span>
-        <button className="btn-icon" disabled={idx >= siblings.length - 1}
-          onClick={() => switchBranch(siblings[idx + 1])}>
+        <button className="btn-icon" disabled={idx >= siblings.length - 1} onClick={() => switchBranch(siblings[idx + 1])}>
           <ArrowR size={15} style={{ opacity: idx >= siblings.length - 1 ? 0.25 : 1 }} />
         </button>
         <span style={{ fontSize: 11, fontFamily: "var(--mono)", color: "var(--text3)" }}>versions</span>
@@ -340,7 +311,6 @@ export default function ChatPage() {
           <MessageBubble key={i} msg={msg} fontSize={fontSz} />
         ))}
 
-        {/* Streaming bubble */}
         {streaming && streamText && (
           <MessageBubble msg={{ role: "assistant", content: streamText }} fontSize={fontSz} isStreaming />
         )}
@@ -355,9 +325,7 @@ export default function ChatPage() {
           </div>
         )}
 
-        {/* Branch arrows under last assistant reply */}
         <BranchArrows />
-
         <div ref={bottomRef} style={{ height: 8 }} />
       </div>
 
@@ -387,35 +355,24 @@ export default function ChatPage() {
           className="input"
           value={input}
           onChange={e => setInput(e.target.value)}
-          onKeyDown={e => {
-            if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
-          }}
+          onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); } }}
           placeholder="Type a message…"
           rows={1}
-          style={{
-            flex: 1, resize: "none", fontSize: fontSz,
-            maxHeight: 120, overflowY: "auto",
-            fontStyle: input.trim() === "" ? "normal" : "normal",
-          }}
+          style={{ flex: 1, resize: "none", fontSize: fontSz, maxHeight: 120, overflowY: "auto" }}
         />
-        <button
-          onClick={sendMessage}
-          disabled={!input.trim() || streaming}
-          style={{
-            width: 42, height: 42, borderRadius: "50%", border: "none",
-            background: input.trim() && !streaming ? "var(--accent)" : "var(--bg4)",
-            color: input.trim() && !streaming ? "#1a1208" : "var(--text3)",
-            display: "flex", alignItems: "center", justifyContent: "center",
-            cursor: input.trim() && !streaming ? "pointer" : "default",
-            transition: "all 0.15s", flexShrink: 0, alignSelf: "flex-end",
-          }}>
+        <button onClick={sendMessage} disabled={!input.trim() || streaming} style={{
+          width: 42, height: 42, borderRadius: "50%", border: "none",
+          background: input.trim() && !streaming ? "var(--accent)" : "var(--bg4)",
+          color: input.trim() && !streaming ? "#1a1208" : "var(--text3)",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          cursor: input.trim() && !streaming ? "pointer" : "default",
+          transition: "all 0.15s", flexShrink: 0, alignSelf: "flex-end",
+        }}>
           <Send size={18} />
         </button>
       </div>
 
       {/* ── SHEETS ── */}
-
-      {/* Retry sheet */}
       {sheet === "retry" && (
         <BottomSheet title="Retry" onClose={() => setSheet(null)}>
           <input className="input" placeholder="Direction (optional) — e.g. be more shy…"
@@ -427,7 +384,6 @@ export default function ChatPage() {
         </BottomSheet>
       )}
 
-      {/* Style sheet */}
       {sheet === "style" && (
         <BottomSheet title="Reply Style" onClose={() => setSheet(null)}>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
@@ -449,8 +405,7 @@ export default function ChatPage() {
           </div>
           <div style={{ fontSize: 12, color: "var(--text3)", fontFamily: "var(--mono)", marginTop: 4 }}>Custom tone</div>
           <div style={{ display: "flex", gap: 8 }}>
-            <input className="input" placeholder='e.g. drunk, cold and distant…'
-              id="as-input" style={{ flex: 1 }} />
+            <input className="input" placeholder='e.g. drunk, cold and distant…' id="as-input" style={{ flex: 1 }} />
             <button className="btn btn-ghost btn-sm" onClick={() => {
               const val = document.getElementById("as-input").value.trim();
               if (val) injectStyle(`as ${val}`);
@@ -459,7 +414,6 @@ export default function ChatPage() {
         </BottomSheet>
       )}
 
-      {/* Bookmark save sheet */}
       {sheet === "bookmark" && (
         <BottomSheet title="Save Bookmark" onClose={() => setSheet(null)}>
           <input className="input" placeholder="Label — e.g. before the argument…"
@@ -471,7 +425,6 @@ export default function ChatPage() {
         </BottomSheet>
       )}
 
-      {/* Bookmarks list sheet */}
       {sheet === "bookmarks" && (
         <BottomSheet title="Bookmarks" onClose={() => setSheet(null)}>
           {bookmarks.length === 0 && (
@@ -503,7 +456,6 @@ export default function ChatPage() {
         </BottomSheet>
       )}
 
-      {/* Search sheet */}
       {sheet === "search" && (
         <BottomSheet title="Search Chat" onClose={() => { setSheet(null); setSearchQuery(""); }}>
           <input className="input" placeholder="Search messages…" value={searchQuery}
@@ -516,7 +468,6 @@ export default function ChatPage() {
         </BottomSheet>
       )}
 
-      {/* Commands reference sheet */}
       {sheet === "commands" && (
         <BottomSheet title="/commands" onClose={() => setSheet(null)}>
           <pre style={{
@@ -529,15 +480,10 @@ export default function ChatPage() {
   );
 }
 
-// ── MESSAGE BUBBLE ─────────────────────────────────────────────────────────────
 function MessageBubble({ msg, fontSize, isStreaming }) {
   const isUser = msg.role === "user";
   return (
-    <div style={{
-      display: "flex",
-      justifyContent: isUser ? "flex-end" : "flex-start",
-      marginBottom: 12,
-    }}>
+    <div style={{ display: "flex", justifyContent: isUser ? "flex-end" : "flex-start", marginBottom: 12 }}>
       <div style={{
         maxWidth: "85%",
         padding: isUser ? "10px 14px" : "12px 16px",
@@ -546,11 +492,9 @@ function MessageBubble({ msg, fontSize, isStreaming }) {
           : "var(--radius-lg) var(--radius-lg) var(--radius-lg) 4px",
         background: isUser ? "var(--bg4)" : "var(--bg2)",
         border: isUser ? "1px solid var(--border)" : "1px solid var(--border2)",
-        fontSize,
-        lineHeight: 1.65,
+        fontSize, lineHeight: 1.65,
         color: isUser ? "var(--text2)" : "var(--text)",
-        whiteSpace: "pre-wrap",
-        wordBreak: "break-word",
+        whiteSpace: "pre-wrap", wordBreak: "break-word",
       }} className={isStreaming ? "streaming-cursor" : ""}>
         {msg.content}
       </div>
@@ -558,7 +502,6 @@ function MessageBubble({ msg, fontSize, isStreaming }) {
   );
 }
 
-// ── TOOLBAR BUTTON ────────────────────────────────────────────────────────────
 function ToolBtn({ icon, label, onClick, disabled }) {
   return (
     <button onClick={onClick} disabled={disabled} style={{
