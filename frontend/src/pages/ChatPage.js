@@ -35,10 +35,9 @@ function visibleMessages(branch) {
 }
 
 // ── BRANCH FORK MAP ──────────────────────────────────────────────────────────
-// For each assistant message in the active branch, find all branches that:
-// 1. Share IDENTICAL user messages as the "trigger" for that reply
-//    (the user message just before this assistant reply must match)
-// 2. Have a reply at that position (may differ)
+// For each assistant message in the active branch, find branches that diverge
+// EXACTLY at that position — meaning ALL messages before it are identical,
+// but the assistant reply at that position may differ.
 // Returns Map<visibleMsgIndex, branch[]> — only entries with 2+ branches.
 function buildForkMap(activeBranch, allBranches) {
   const forkMap = new Map();
@@ -49,22 +48,17 @@ function buildForkMap(activeBranch, allBranches) {
   activeVisible.forEach((msg, visIdx) => {
     if (msg.role !== "assistant") return;
 
-    // The user message that triggered this reply
-    const triggerUser = visIdx > 0 ? activeVisible[visIdx - 1]?.content : null;
-
     const forks = allBranches.filter(b => {
       const bVisible = visibleMessages(b);
       // Must have a message at this index
       if (bVisible.length <= visIdx) return false;
       // Must be an assistant reply at this index
       if (bVisible[visIdx]?.role !== "assistant") return false;
-      // The user message just before must match exactly
-      const bTrigger = visIdx > 0 ? bVisible[visIdx - 1]?.content : null;
-      if (triggerUser !== bTrigger) return false;
-      // All user messages before the trigger must also match
-      // (ensures we're on the same conversation path)
-      for (let i = 0; i < visIdx - 1; i++) {
-        if (activeVisible[i]?.role === "user" && bVisible[i]?.content !== activeVisible[i]?.content) return false;
+      // ALL messages before this index must be IDENTICAL
+      // This is strict — both user and assistant messages must match
+      for (let i = 0; i < visIdx; i++) {
+        if (bVisible[i]?.content !== activeVisible[i]?.content) return false;
+        if (bVisible[i]?.role !== activeVisible[i]?.role) return false;
       }
       return true;
     });
