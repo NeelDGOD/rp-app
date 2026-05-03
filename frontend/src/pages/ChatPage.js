@@ -34,44 +34,39 @@ function visibleMessages(branch) {
   return branch.history.filter(m => m.role === "user" || m.role === "assistant");
 }
 
-// ── BRANCH FORK MAP ───────────────────────────────────────────────────────────
-// For each assistant message index in the active branch's visible history,
-// find all branches that share the same history up to that point but differ at it.
-// Returns: Map<visibleMsgIndex, branch[]>
-// Only includes entries where there are 2+ options (i.e. a real fork exists).
+// ── BRANCH FORK MAP ──────────────────────────────────────────────────────────
+// For each assistant message in the active branch, find all branches that:
+// 1. Share IDENTICAL user messages as the "trigger" for that reply
+//    (the user message just before this assistant reply must match)
+// 2. Have a reply at that position (may differ)
+// Returns Map<visibleMsgIndex, branch[]> — only entries with 2+ branches.
 function buildForkMap(activeBranch, allBranches) {
   const forkMap = new Map();
   if (!activeBranch || allBranches.length <= 1) return forkMap;
 
   const activeVisible = visibleMessages(activeBranch);
 
-  // For every assistant message in the active branch
   activeVisible.forEach((msg, visIdx) => {
     if (msg.role !== "assistant") return;
 
-    // The assistant message at visIdx corresponds to what position in full history?
-    // We need to find branches that diverge exactly here.
-    // A branch diverges here if:
-    // 1. It shares the same user message just before this assistant message
-    // 2. But has a different assistant reply at this position
+    // The user message that triggered this reply
+    const triggerUser = visIdx > 0 ? activeVisible[visIdx - 1]?.content : null;
 
-    // Get the user message just before this assistant reply
-    const userMsgBefore = visIdx > 0 ? activeVisible[visIdx - 1] : null;
-
-    // Find all branches where their visible messages up to visIdx-1 match,
-    // meaning they share the same conversation up to the user message,
-    // but may differ at this assistant reply
     const forks = allBranches.filter(b => {
-      if (b.id === activeBranch.id) return true; // always include self
       const bVisible = visibleMessages(b);
+      // Must have a message at this index
       if (bVisible.length <= visIdx) return false;
-
-      // Check that all messages before this point match
-      for (let i = 0; i < visIdx; i++) {
-        if (!bVisible[i] || bVisible[i].content !== activeVisible[i].content) return false;
+      // Must be an assistant reply at this index
+      if (bVisible[visIdx]?.role !== "assistant") return false;
+      // The user message just before must match exactly
+      const bTrigger = visIdx > 0 ? bVisible[visIdx - 1]?.content : null;
+      if (triggerUser !== bTrigger) return false;
+      // All user messages before the trigger must also match
+      // (ensures we're on the same conversation path)
+      for (let i = 0; i < visIdx - 1; i++) {
+        if (activeVisible[i]?.role === "user" && bVisible[i]?.content !== activeVisible[i]?.content) return false;
       }
-      // And that the assistant reply at this position exists (may differ)
-      return bVisible[visIdx] && bVisible[visIdx].role === "assistant";
+      return true;
     });
 
     if (forks.length >= 2) {
@@ -99,6 +94,8 @@ export default function ChatPage() {
   const [bookmarkLabel, setBookmarkLabel] = useState("");
   const [bookmarks, setBookmarks]       = useState([]);
   const [searchQuery, setSearchQuery]   = useState("");
+  const [editingMsg, setEditingMsg]     = useState(null); // {visibleIndex, role, content}
+  const [editText, setEditText]         = useState("");
 
   const bottomRef = useRef(null);
   const inputRef  = useRef(null);
@@ -228,6 +225,45 @@ export default function ChatPage() {
     } catch (e) { toast(e.message, "error"); }
   }
 
+  // ── EDIT LUNA MESSAGE (in-place, no branch) ──
+  async function doEditLuna(visibleIndex, newContent) {
+    if (!activeBranch) return;
+    try {
+      const res = await api.editMessage(activeBranch.id, visibleIndex, newContent);
+      setActiveBranch(b => ({ ...b, history: res.history }));
+      setEditingMsg(null);
+      toast("Reply updated", "success", 2000);
+    } catch (e) { toast(e.message, "error"); }
+  }
+
+  // ── EDIT USER MESSAGE (creates new branch like retry) ──
+  async function doEditUser(visibleIndex, newContent) {
+    if (!activeBranch || streaming) return;
+    setEditingMsg(null);
+    setStreaming(true); setStreamText("");
+    const branchIdAtEdit = activeBranch.id;
+
+    api.editUserStream(
+      chatId,
+      { branch_id: branchIdAtEdit, visible_index: visibleIndex, new_content: newContent },
+      (delta) => setStreamText(t => t + delta),
+      async (evt) => {
+        setStreaming(false); setStreamText("");
+        if (evt.needs_memory && autoMem) triggerMemoryUpdate(evt.branch_id, true);
+        const updated = await api.getChat(chatId);
+        const branches = updated.branches || [];
+        setAllBranches(branches);
+        setChat(updated);
+        const newBranch = branches.find(b => b.id === evt.branch_id);
+        if (newBranch) setActiveBranch(newBranch);
+      },
+      (err) => {
+        setStreaming(false); setStreamText("");
+        toast(`Edit error: ${err.message}`, "error", 6000);
+      }
+    );
+  }
+
   // ── MEMORY ──
   async function triggerMemoryUpdate(branchId, silent = false) {
     try {
@@ -326,11 +362,23 @@ export default function ChatPage() {
       {/* ── MESSAGES ── */}
       <div style={{ flex: 1, overflowY: "auto", padding: "12px 12px 4px" }}>
         {displayMessages.map((msg, i) => {
-          // Only show fork arrows on assistant messages that have actual forks
           const forks = msg.role === "assistant" ? forkMap.get(i) : null;
           return (
             <React.Fragment key={i}>
-              <MessageBubble msg={msg} fontSize={fontSz} />
+              <MessageBubble
+                msg={msg}
+                fontSize={fontSz}
+                visibleIndex={i}
+                isEditing={editingMsg?.visibleIndex === i}
+                editText={editingMsg?.visibleIndex === i ? editText : ""}
+                onEditStart={() => { setEditingMsg({ visibleIndex: i, role: msg.role }); setEditText(msg.content); }}
+                onEditChange={setEditText}
+                onEditConfirm={() => {
+                  if (msg.role === "assistant") doEditLuna(i, editText);
+                  else doEditUser(i, editText);
+                }}
+                onEditCancel={() => setEditingMsg(null)}
+              />
               {forks && (
                 <InlineBranchArrows
                   forks={forks}
@@ -555,10 +603,40 @@ function InlineBranchArrows({ forks, activeBranch, msgIndex, onSwitch }) {
 }
 
 // ── MESSAGE BUBBLE ────────────────────────────────────────────────────────────
-function MessageBubble({ msg, fontSize, isStreaming }) {
+function MessageBubble({ msg, fontSize, isStreaming, visibleIndex,
+  isEditing, editText, onEditStart, onEditChange, onEditConfirm, onEditCancel }) {
   const isUser = msg.role === "user";
+
+  if (isEditing) {
+    return (
+      <div style={{ display: "flex", justifyContent: isUser ? "flex-end" : "flex-start", marginBottom: 12 }}>
+        <div style={{ maxWidth: "90%", width: "90%", display: "flex", flexDirection: "column", gap: 8 }}>
+          <textarea
+            autoFocus
+            value={editText}
+            onChange={e => onEditChange(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); onEditConfirm(); } }}
+            style={{
+              width: "100%", padding: "10px 14px", borderRadius: "var(--radius-sm)",
+              background: "var(--bg3)", border: "1px solid var(--accent)",
+              color: "var(--text)", fontFamily: "var(--font)", fontSize,
+              lineHeight: 1.6, resize: "none", minHeight: 80, outline: "none",
+            }}
+          />
+          <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+            <button className="btn btn-ghost btn-sm" onClick={onEditCancel}>Cancel</button>
+            <button className="btn btn-primary btn-sm" onClick={onEditConfirm}>
+              {isUser ? "Send edited" : "Save"}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div style={{ display: "flex", justifyContent: isUser ? "flex-end" : "flex-start", marginBottom: 12 }}>
+    <div style={{ display: "flex", justifyContent: isUser ? "flex-end" : "flex-start", marginBottom: 4 }}
+      onClick={onEditStart}>
       <div style={{
         maxWidth: "85%",
         padding: isUser ? "10px 14px" : "12px 16px",
@@ -570,6 +648,7 @@ function MessageBubble({ msg, fontSize, isStreaming }) {
         fontSize, lineHeight: 1.65,
         color: isUser ? "var(--text2)" : "var(--text)",
         whiteSpace: "pre-wrap", wordBreak: "break-word",
+        cursor: "text",
       }} className={isStreaming ? "streaming-cursor" : ""}>
         {msg.content}
       </div>
