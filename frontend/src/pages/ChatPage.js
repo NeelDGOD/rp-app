@@ -35,36 +35,69 @@ function visibleMessages(branch) {
 }
 
 // ── BRANCH FORK MAP ──────────────────────────────────────────────────────────
-// For each assistant message in the active branch, find branches that diverge
-// EXACTLY at that position — meaning ALL messages before it are identical,
-// but the assistant reply at that position may differ.
+// Uses fork_message_index from the database — the exact history index where
+// each branch was created. Converts that to a visible message index and groups
+// branches that fork at the same point.
 // Returns Map<visibleMsgIndex, branch[]> — only entries with 2+ branches.
 function buildForkMap(activeBranch, allBranches) {
   const forkMap = new Map();
   if (!activeBranch || allBranches.length <= 1) return forkMap;
 
-  const activeVisible = visibleMessages(activeBranch);
+  // Build a lookup: full history index → visible message index
+  // for the active branch
+  const h = activeBranch.history;
+  const fullToVisible = {};
+  let visCount = 0;
+  h.forEach((m, i) => {
+    if (m.role === "user" || m.role === "assistant") {
+      fullToVisible[i] = visCount++;
+    }
+  });
 
-  activeVisible.forEach((msg, visIdx) => {
-    if (msg.role !== "assistant") return;
+  // Group all branches by their fork_message_index
+  // fork_message_index is the length of hist_base at fork time
+  // meaning the new branch's first new message is at that index
+  // which is an assistant message (the new reply)
+  const byForkIdx = {};
+  allBranches.forEach(b => {
+    const fmi = b.fork_message_index;
+    if (fmi === 0 && !b.parent_branch_id) return; // root branch, skip
+    if (!byForkIdx[fmi]) byForkIdx[fmi] = [];
+    byForkIdx[fmi].push(b);
+  });
 
-    const forks = allBranches.filter(b => {
-      const bVisible = visibleMessages(b);
-      // Must have a message at this index
-      if (bVisible.length <= visIdx) return false;
-      // Must be an assistant reply at this index
-      if (bVisible[visIdx]?.role !== "assistant") return false;
-      // ALL messages before this index must be IDENTICAL
-      // This is strict — both user and assistant messages must match
-      for (let i = 0; i < visIdx; i++) {
-        if (bVisible[i]?.content !== activeVisible[i]?.content) return false;
-        if (bVisible[i]?.role !== activeVisible[i]?.role) return false;
+  // For each fork point, find what visible index the forked assistant reply is at
+  Object.entries(byForkIdx).forEach(([fmi, branches]) => {
+    const forkIdx = parseInt(fmi);
+    // The forked assistant message is at full history index forkIdx
+    // (hist_base ends at forkIdx, new assistant reply is appended right after)
+    // Find the visible index of that position
+    const visIdx = fullToVisible[forkIdx];
+    if (visIdx === undefined) return;
+
+    // Include the active branch itself if it shares this fork point
+    // (active branch is either one of the siblings or the parent)
+    const activeFmi = activeBranch.fork_message_index;
+    const activeParent = activeBranch.parent_branch_id;
+
+    // Collect all branches at this fork: the siblings + parent if active is a sibling
+    let allAtFork = [...branches];
+
+    // Find the parent branch of these siblings
+    const parentId = branches[0]?.parent_branch_id;
+    if (parentId) {
+      const parentBranch = allBranches.find(b => b.id === parentId);
+      if (parentBranch && !allAtFork.find(b => b.id === parentBranch.id)) {
+        allAtFork = [parentBranch, ...allAtFork];
       }
-      return true;
-    });
+    }
 
-    if (forks.length >= 2) {
-      forkMap.set(visIdx, forks);
+    if (allAtFork.length >= 2) {
+      // Only show if active branch is one of these or the parent
+      const isRelevant = allAtFork.some(b => b.id === activeBranch.id);
+      if (isRelevant) {
+        forkMap.set(visIdx, allAtFork);
+      }
     }
   });
 
