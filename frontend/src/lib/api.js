@@ -47,6 +47,22 @@ export const api = {
   // Undo
   undo: (branchId) => request("POST", `/branches/${branchId}/undo`),
 
+  // Edit message in branch history (Luna's messages — in place)
+  editMessage: (branchId, visibleIndex, newContent) =>
+    request("POST", `/branches/${branchId}/edit-message`, { visible_index: visibleIndex, new_content: newContent }),
+
+  // Edit user message — streaming, creates new branch
+  editUserStream: (chatId, body, onDelta, onDone, onError) => {
+    return fetch(`${BASE}/chats/${chatId}/edit-user`, {
+      method: "POST",
+      headers: getHeaders(),
+      body: JSON.stringify(body),
+    }).then((res) => {
+      if (!res.ok) throw new Error("Edit failed");
+      return readStream(res.body, onDelta, onDone, onError);
+    }).catch(onError);
+  },
+
   // Memory
   updateMemory: (branchId) => request("POST", `/branches/${branchId}/memory`),
 
