@@ -47,6 +47,18 @@ export const api = {
   // Undo
   undo: (branchId) => request("POST", `/branches/${branchId}/undo`),
 
+  // Test chat — bare model, no system prompt
+  testChatStream: (messages, onDelta, onDone, onError) => {
+    return fetch(`${BASE}/test-chat`, {
+      method: "POST",
+      headers: getHeaders(),
+      body: JSON.stringify({ messages }),
+    }).then((res) => {
+      if (!res.ok) throw new Error("Test chat failed");
+      return readStream(res.body, onDelta, onDone, onError);
+    }).catch(onError);
+  },
+
   // Edit message in branch history (Luna's messages — in place)
   editMessage: (branchId, visibleIndex, newContent) =>
     request("POST", `/branches/${branchId}/edit-message`, { visible_index: visibleIndex, new_content: newContent }),
