@@ -1,20 +1,63 @@
-import React, { useState, useEffect } from "react";
-import { Eye, EyeOff } from "lucide-react";
+import React, { useState, useEffect, useRef } from "react";
+import { Eye, EyeOff, Send, Trash2 } from "lucide-react";
+import { api } from "../lib/api";
 
 export default function SettingsPage() {
-  const [token, setToken]     = useState("");
+  const [token, setToken]       = useState("");
   const [showToken, setShowToken] = useState(false);
-  const [autoMem, setAutoMem] = useState(true);
+  const [model, setModel]       = useState("deepseek-ai/DeepSeek-V3");
+  const [autoMem, setAutoMem]   = useState(true);
   const [fontSize, setFontSize] = useState(17);
+
+  // Test chat
+  const [testMessages, setTestMessages] = useState([]);
+  const [testInput, setTestInput]       = useState("");
+  const [testStreaming, setTestStreaming] = useState(false);
+  const [testStreamText, setTestStreamText] = useState("");
+  const testBottomRef = useRef(null);
 
   useEffect(() => {
     setToken(localStorage.getItem("hf_token") || "");
+    setModel(localStorage.getItem("hf_model") || "deepseek-ai/DeepSeek-V3");
     setAutoMem(localStorage.getItem("auto_memory") !== "false");
     setFontSize(parseInt(localStorage.getItem("font_size") || "17"));
   }, []);
 
-  function save(key, val) {
-    localStorage.setItem(key, val);
+  useEffect(() => {
+    testBottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [testMessages, testStreamText]);
+
+  function save(key, val) { localStorage.setItem(key, String(val)); }
+
+  async function sendTestMessage() {
+    if (!testInput.trim() || testStreaming) return;
+    const text = testInput.trim();
+    setTestInput("");
+    const newMessages = [...testMessages, { role: "user", content: text }];
+    setTestMessages(newMessages);
+    setTestStreaming(true);
+    let accumulated = "";
+    setTestStreamText("");
+
+    api.testChatStream(
+      newMessages,
+      (delta) => {
+        accumulated += delta;
+        setTestStreamText(accumulated);
+      },
+      () => {
+        setTestMessages(msgs => [...msgs, { role: "assistant", content: accumulated }]);
+        setTestStreaming(false);
+        setTestStreamText("");
+      },
+      (err) => {
+        setTestStreaming(false);
+        setTestStreamText("");
+        setTestInput(text);
+        setTestMessages(prev => prev.slice(0, -1));
+        alert(`Error: ${err.message}`);
+      }
+    );
   }
 
   return (
@@ -23,7 +66,7 @@ export default function SettingsPage() {
         <span className="page-title">Settings</span>
       </div>
 
-      {/* HF Token */}
+      {/* ── HF TOKEN ── */}
       <div style={{ padding: "16px 16px 0" }}>
         <div style={{ fontSize: 12, fontFamily: "var(--mono)", color: "var(--text3)", marginBottom: 8, letterSpacing: "0.5px", textTransform: "uppercase" }}>
           Hugging Face Token
@@ -44,13 +87,32 @@ export default function SettingsPage() {
           </button>
         </div>
         <div style={{ fontSize: 12, color: "var(--text3)", marginTop: 6 }}>
-          Stored locally in your browser. Never sent anywhere except the API.
+          Stored locally in your browser only.
         </div>
       </div>
 
       <div style={{ height: 1, background: "var(--border)", margin: "20px 0" }} />
 
-      {/* Auto memory */}
+      {/* ── MODEL ── */}
+      <div style={{ padding: "0 16px" }}>
+        <div style={{ fontSize: 12, fontFamily: "var(--mono)", color: "var(--text3)", marginBottom: 8, letterSpacing: "0.5px", textTransform: "uppercase" }}>
+          Model
+        </div>
+        <input
+          className="input"
+          placeholder="deepseek-ai/DeepSeek-V3"
+          value={model}
+          onChange={e => { setModel(e.target.value); save("hf_model", e.target.value); }}
+          style={{ fontFamily: "var(--mono)", fontSize: 14 }}
+        />
+        <div style={{ fontSize: 12, color: "var(--text3)", marginTop: 6 }}>
+          Full model string e.g. <span style={{ color: "var(--text2)", fontFamily: "var(--mono)" }}>deepseek-ai/DeepSeek-V4-Pro:novita</span>
+        </div>
+      </div>
+
+      <div style={{ height: 1, background: "var(--border)", margin: "20px 0" }} />
+
+      {/* ── AUTO MEMORY ── */}
       <div className="settings-item">
         <div>
           <div className="settings-label">Auto Memory Update</div>
@@ -65,7 +127,7 @@ export default function SettingsPage() {
         </label>
       </div>
 
-      {/* Font size */}
+      {/* ── FONT SIZE ── */}
       <div style={{ padding: "16px" }}>
         <div style={{ fontSize: 12, fontFamily: "var(--mono)", color: "var(--text3)", marginBottom: 12, letterSpacing: "0.5px", textTransform: "uppercase" }}>
           Chat Font Size — {fontSize}px
@@ -82,19 +144,106 @@ export default function SettingsPage() {
         </div>
       </div>
 
-      <div style={{ height: 1, background: "var(--border)", margin: "4px 0" }} />
+      <div style={{ height: 1, background: "var(--border)", margin: "4px 0 0" }} />
 
-      {/* About */}
-      <div style={{ padding: 16 }}>
-        <div style={{ fontSize: 12, fontFamily: "var(--mono)", color: "var(--text3)", marginBottom: 8, letterSpacing: "0.5px", textTransform: "uppercase" }}>
-          About
+      {/* ── TEST CHAT ── */}
+      <div style={{ padding: "16px 16px 8px" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+          <div>
+            <div style={{ fontSize: 12, fontFamily: "var(--mono)", color: "var(--text3)", letterSpacing: "0.5px", textTransform: "uppercase" }}>
+              Model Test Chat
+            </div>
+            <div style={{ fontSize: 12, color: "var(--text3)", marginTop: 3 }}>
+              Raw model, no character context
+            </div>
+          </div>
+          {testMessages.length > 0 && (
+            <button className="btn-icon" style={{ color: "var(--text3)" }}
+              onClick={() => { setTestMessages([]); setTestStreamText(""); }}>
+              <Trash2 size={16} />
+            </button>
+          )}
         </div>
-        <div style={{ fontSize: 14, color: "var(--text3)", lineHeight: 1.7 }}>
-          Model: <span style={{ color: "var(--text2)", fontFamily: "var(--mono)" }}>deepseek-ai/DeepSeek-V3</span><br />
-          Backend streams responses via Hugging Face Inference API.<br />
-          All chats stored in your private Turso database.
+
+        {/* Messages */}
+        <div style={{
+          background: "var(--bg2)", borderRadius: "var(--radius-sm)",
+          border: "1px solid var(--border)", minHeight: 120, maxHeight: 320,
+          overflowY: "auto", padding: 12, display: "flex", flexDirection: "column", gap: 10,
+        }}>
+          {testMessages.length === 0 && !testStreaming && (
+            <div style={{ color: "var(--text3)", fontSize: 14, textAlign: "center", margin: "auto" }}>
+              Send a message to test the model
+            </div>
+          )}
+          {testMessages.map((m, i) => (
+            <div key={i} style={{
+              display: "flex", justifyContent: m.role === "user" ? "flex-end" : "flex-start"
+            }}>
+              <div style={{
+                maxWidth: "85%", padding: "8px 12px", fontSize: 15, lineHeight: 1.6,
+                borderRadius: m.role === "user"
+                  ? "var(--radius-lg) var(--radius-lg) 4px var(--radius-lg)"
+                  : "var(--radius-lg) var(--radius-lg) var(--radius-lg) 4px",
+                background: m.role === "user" ? "var(--bg4)" : "var(--bg3)",
+                border: `1px solid ${m.role === "user" ? "var(--border)" : "var(--border2)"}`,
+                color: m.role === "user" ? "var(--text2)" : "var(--text)",
+                whiteSpace: "pre-wrap", wordBreak: "break-word",
+              }}>
+                {m.content}
+              </div>
+            </div>
+          ))}
+          {testStreaming && testStreamText && (
+            <div style={{ display: "flex", justifyContent: "flex-start" }}>
+              <div style={{
+                maxWidth: "85%", padding: "8px 12px", fontSize: 15, lineHeight: 1.6,
+                borderRadius: "var(--radius-lg) var(--radius-lg) var(--radius-lg) 4px",
+                background: "var(--bg3)", border: "1px solid var(--border2)",
+                color: "var(--text)", whiteSpace: "pre-wrap", wordBreak: "break-word",
+              }} className="streaming-cursor">
+                {testStreamText}
+              </div>
+            </div>
+          )}
+          {testStreaming && !testStreamText && (
+            <div style={{ display: "flex", gap: 5, padding: "4px 0", alignItems: "center" }}>
+              {[0,1,2].map(i => (
+                <div key={i} style={{
+                  width: 5, height: 5, borderRadius: "50%", background: "var(--accent)",
+                  animation: "pulse 1.2s infinite", animationDelay: `${i * 0.2}s`
+                }} />
+              ))}
+            </div>
+          )}
+          <div ref={testBottomRef} />
+        </div>
+
+        {/* Input */}
+        <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+          <input
+            className="input"
+            placeholder="Type to test model…"
+            value={testInput}
+            onChange={e => setTestInput(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter") sendTestMessage(); }}
+            style={{ flex: 1, fontSize: 15 }}
+            disabled={testStreaming}
+          />
+          <button onClick={sendTestMessage} disabled={!testInput.trim() || testStreaming} style={{
+            width: 40, height: 40, borderRadius: "50%", border: "none", flexShrink: 0,
+            background: testInput.trim() && !testStreaming ? "var(--accent)" : "var(--bg4)",
+            color: testInput.trim() && !testStreaming ? "#1a1208" : "var(--text3)",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            cursor: testInput.trim() && !testStreaming ? "pointer" : "default",
+            transition: "all 0.15s",
+          }}>
+            <Send size={16} />
+          </button>
         </div>
       </div>
+
+      <div style={{ height: 32 }} />
     </div>
   );
 }
