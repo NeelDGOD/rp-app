@@ -8,6 +8,9 @@ export default function SettingsPage() {
   const [model, setModel]       = useState("deepseek-ai/DeepSeek-V3");
   const [autoMem, setAutoMem]   = useState(true);
   const [fontSize, setFontSize] = useState(17);
+  const [savedModels, setSavedModels] = useState([]);
+  const [newModelStr, setNewModelStr] = useState("");
+  const [newModelName, setNewModelName] = useState("");
 
   // Test chat
   const [testMessages, setTestMessages] = useState([]);
@@ -21,6 +24,10 @@ export default function SettingsPage() {
     setModel(localStorage.getItem("hf_model") || "deepseek-ai/DeepSeek-V3");
     setAutoMem(localStorage.getItem("auto_memory") !== "false");
     setFontSize(parseInt(localStorage.getItem("font_size") || "17"));
+    try {
+      const saved = JSON.parse(localStorage.getItem("saved_models") || "[]");
+      setSavedModels(saved);
+    } catch { setSavedModels([]); }
   }, []);
 
   useEffect(() => {
@@ -28,6 +35,25 @@ export default function SettingsPage() {
   }, [testMessages, testStreamText]);
 
   function save(key, val) { localStorage.setItem(key, String(val)); }
+
+  function addSavedModel() {
+    if (!newModelStr.trim()) return;
+    const entry = { name: newModelName.trim() || newModelStr.trim(), model: newModelStr.trim() };
+    const updated = [...savedModels, entry];
+    setSavedModels(updated);
+    localStorage.setItem("saved_models", JSON.stringify(updated));
+    setNewModelStr(""); setNewModelName("");
+  }
+
+  function removeSavedModel(idx) {
+    const updated = savedModels.filter((_, i) => i !== idx);
+    setSavedModels(updated);
+    localStorage.setItem("saved_models", JSON.stringify(updated));
+  }
+
+  function selectSavedModel(m) {
+    setModel(m); save("hf_model", m);
+  }
 
   async function sendTestMessage() {
     if (!testInput.trim() || testStreaming) return;
@@ -141,6 +167,61 @@ export default function SettingsPage() {
         </div>
         <div style={{ marginTop: 16, padding: 14, background: "var(--bg3)", borderRadius: "var(--radius-sm)", fontSize, fontStyle: "italic", color: "var(--text2)" }}>
           She looked away, biting her lip as if weighing whether to say it.
+        </div>
+      </div>
+
+      <div style={{ height: 1, background: "var(--border)", margin: "4px 0 0" }} />
+
+      {/* ── SAVED MODELS ── */}
+      <div style={{ padding: "16px" }}>
+        <div style={{ fontSize: 12, fontFamily: "var(--mono)", color: "var(--text3)", marginBottom: 12, letterSpacing: "0.5px", textTransform: "uppercase" }}>
+          Saved Models
+        </div>
+
+        {/* Saved model pills */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}>
+          {savedModels.length === 0 && (
+            <div style={{ fontSize: 13, color: "var(--text3)" }}>No saved models yet.</div>
+          )}
+          {savedModels.map((m, i) => (
+            <div key={i} style={{
+              display: "flex", alignItems: "center", gap: 10,
+              padding: "10px 12px", borderRadius: "var(--radius-sm)",
+              background: model === m.model ? "var(--accent-bg2)" : "var(--bg3)",
+              border: `1px solid ${model === m.model ? "var(--accent)" : "var(--border)"}`,
+              cursor: "pointer",
+            }} onClick={() => selectSavedModel(m.model)}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 15, color: model === m.model ? "var(--accent)" : "var(--text)" }}>
+                  {m.name}
+                </div>
+                <div style={{ fontSize: 11, fontFamily: "var(--mono)", color: "var(--text3)", marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                  {m.model}
+                </div>
+              </div>
+              <button className="btn-icon" style={{ color: "var(--text3)", flexShrink: 0 }}
+                onClick={e => { e.stopPropagation(); removeSavedModel(i); }}>
+                ✕
+              </button>
+            </div>
+          ))}
+        </div>
+
+        {/* Add new model */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <input className="input" placeholder="Nickname (optional) — e.g. V4 Pro"
+            value={newModelName} onChange={e => setNewModelName(e.target.value)}
+            style={{ fontSize: 15 }} />
+          <div style={{ display: "flex", gap: 8 }}>
+            <input className="input" placeholder="deepseek-ai/DeepSeek-V4-Pro:novita"
+              value={newModelStr} onChange={e => setNewModelStr(e.target.value)}
+              onKeyDown={e => e.key === "Enter" && addSavedModel()}
+              style={{ flex: 1, fontFamily: "var(--mono)", fontSize: 13 }} />
+            <button className="btn btn-primary btn-sm" onClick={addSavedModel}
+              disabled={!newModelStr.trim()}>
+              Add
+            </button>
+          </div>
         </div>
       </div>
 
