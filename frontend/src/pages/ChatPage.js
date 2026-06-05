@@ -208,6 +208,8 @@ export default function ChatPage() {
       (err) => {
         setStreaming(false); setStreamText("");
         setActiveBranch(b => ({ ...b, history: historyAtSend }));
+        setInput(text);
+        sessionStorage.setItem(`draft_${chatId}`, text);
         toast(`API error: ${err.message}`, "error", 6000);
       }
     );
