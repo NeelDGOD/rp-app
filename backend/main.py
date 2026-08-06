@@ -20,12 +20,24 @@ app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 # ── DATABASE ──────────────────────────────────────────────────────────────────
+class _DBConnWrapper:
+    def __init__(self, inner):
+        self._inner = inner
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+    def close(self):
+        close = getattr(self._inner, "close", None)
+        if close:
+            close()
+
 def get_db():
     try:
         import libsql_experimental as libsql
         if TURSO_TOKEN:
-            return libsql.connect(TURSO_URL, auth_token=TURSO_TOKEN)
-        return libsql.connect(TURSO_URL)
+            conn = libsql.connect(TURSO_URL, auth_token=TURSO_TOKEN)
+        else:
+            conn = libsql.connect(TURSO_URL)
+        return _DBConnWrapper(conn)
     except ImportError:
         import sqlite3
         conn = sqlite3.connect(TURSO_URL.replace("file:", ""))

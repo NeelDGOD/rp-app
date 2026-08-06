@@ -35,16 +35,47 @@ function visibleMessages(branch) {
 }
 
 // ── BRANCH FORK MAP ──────────────────────────────────────────────────────────
-// Uses fork_message_index from the database — the exact history index where
-// each branch was created. Converts that to a visible message index and groups
-// branches that fork at the same point.
-// Returns Map<visibleMsgIndex, branch[]> — only entries with 2+ branches.
+// Groups branches into "fork clusters" — sets of branches that are alternate
+// versions of the same reply/edit. A retry chain (branch1 → branch2 → branch3,
+// each parented to the previous) all share the same fork_message_index, so we
+// walk each branch's parent_branch_id chain back to the true common ancestor
+// ("anchor") instead of trusting the raw index number alone. That number is
+// just an array-length int — two *unrelated* fork points (e.g. a retry at one
+// spot and an edited message at a different spot) can coincidentally produce
+// the same value, which would wrongly merge them if we grouped by number alone.
+// Keying by (anchor id + fork index) instead makes that collision impossible.
+// Returns Map<visibleMsgIndex, branch[]> — only entries with 2+ versions.
 function buildForkMap(activeBranch, allBranches) {
   const forkMap = new Map();
   if (!activeBranch || allBranches.length <= 1) return forkMap;
 
-  // Build a lookup: full history index → visible message index
-  // for the active branch
+  const byId = new Map(allBranches.map(b => [b.id, b]));
+
+  // Walk up the parent chain while the fork index stays the same — that's
+  // still the same fork cluster (e.g. retry chains). Stop at the branch whose
+  // parent has a *different* fork index (or no parent) — that parent is the
+  // true anchor all versions in this cluster diverged from.
+  function findAnchor(branch) {
+    let current = branch;
+    while (current.parent_branch_id) {
+      const parent = byId.get(current.parent_branch_id);
+      if (!parent || parent.fork_message_index !== branch.fork_message_index) break;
+      current = parent;
+    }
+    return current.parent_branch_id ? byId.get(current.parent_branch_id) : current;
+  }
+
+  const clusters = new Map(); // "anchorId:fmi" → { anchor, fmi, members: [] }
+  allBranches.forEach(b => {
+    if (!b.parent_branch_id) return; // root branch, not a forked child
+    const anchor = findAnchor(b);
+    if (!anchor) return;
+    const key = `${anchor.id}:${b.fork_message_index}`;
+    if (!clusters.has(key)) clusters.set(key, { anchor, fmi: b.fork_message_index, members: [] });
+    clusters.get(key).members.push(b);
+  });
+
+  // Lookup: full history index → visible message index, for the active branch
   const h = activeBranch.history;
   const fullToVisible = {};
   let visCount = 0;
@@ -54,50 +85,14 @@ function buildForkMap(activeBranch, allBranches) {
     }
   });
 
-  // Group all branches by their fork_message_index
-  // fork_message_index is the length of hist_base at fork time
-  // meaning the new branch's first new message is at that index
-  // which is an assistant message (the new reply)
-  const byForkIdx = {};
-  allBranches.forEach(b => {
-    const fmi = b.fork_message_index;
-    if (fmi === 0 && !b.parent_branch_id) return; // root branch, skip
-    if (!byForkIdx[fmi]) byForkIdx[fmi] = [];
-    byForkIdx[fmi].push(b);
-  });
-
-  // For each fork point, find what visible index the forked assistant reply is at
-  Object.entries(byForkIdx).forEach(([fmi, branches]) => {
-    const forkIdx = parseInt(fmi);
-    // The forked assistant message is at full history index forkIdx
-    // (hist_base ends at forkIdx, new assistant reply is appended right after)
-    // Find the visible index of that position
-    const visIdx = fullToVisible[forkIdx];
+  clusters.forEach(({ anchor, fmi, members }) => {
+    const visIdx = fullToVisible[fmi];
     if (visIdx === undefined) return;
 
-    // Include the active branch itself if it shares this fork point
-    // (active branch is either one of the siblings or the parent)
-    const activeFmi = activeBranch.fork_message_index;
-    const activeParent = activeBranch.parent_branch_id;
-
-    // Collect all branches at this fork: the siblings + parent if active is a sibling
-    let allAtFork = [...branches];
-
-    // Find the parent branch of these siblings
-    const parentId = branches[0]?.parent_branch_id;
-    if (parentId) {
-      const parentBranch = allBranches.find(b => b.id === parentId);
-      if (parentBranch && !allAtFork.find(b => b.id === parentBranch.id)) {
-        allAtFork = [parentBranch, ...allAtFork];
-      }
-    }
-
-    if (allAtFork.length >= 2) {
-      // Only show if active branch is one of these or the parent
-      const isRelevant = allAtFork.some(b => b.id === activeBranch.id);
-      if (isRelevant) {
-        forkMap.set(visIdx, allAtFork);
-      }
+    const allAtFork = [anchor, ...members];
+    const isRelevant = allAtFork.some(b => b.id === activeBranch.id);
+    if (isRelevant) {
+      forkMap.set(visIdx, allAtFork);
     }
   });
 
@@ -391,7 +386,7 @@ export default function ChatPage() {
       {/* ── MESSAGES ── */}
       <div style={{ flex: 1, overflowY: "auto", padding: "12px 12px 4px" }}>
         {displayMessages.map((msg, i) => {
-          const forks = msg.role === "assistant" ? forkMap.get(i) : null;
+          const forks = forkMap.get(i);
           return (
             <React.Fragment key={i}>
               <MessageBubble
