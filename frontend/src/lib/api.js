@@ -3,10 +3,12 @@ const BASE = process.env.REACT_APP_API_URL || "http://localhost:8000";
 function getHeaders() {
   const token = localStorage.getItem("hf_token") || "";
   const model = localStorage.getItem("hf_model") || "deepseek-ai/DeepSeek-V3";
+  const useRag = localStorage.getItem("use_rag") === "true";
   return {
     "Content-Type": "application/json",
     "x-hf-token": token,
     "x-model": model,
+    "x-use-rag": String(useRag),
   };
 }
 

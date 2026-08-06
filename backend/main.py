@@ -13,6 +13,8 @@ TURSO_TOKEN = os.environ.get("TURSO_TOKEN", "")
 DEFAULT_MODEL = "deepseek-ai/DeepSeek-V3"
 MAX_CONTEXT   = 20
 MEM_INTERVAL  = 6
+EMBED_MODEL   = "sentence-transformers/all-MiniLM-L6-v2"
+RAG_TOP_K     = 3
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -66,6 +68,11 @@ def init_db():
             label TEXT NOT NULL, history TEXT NOT NULL, memory TEXT NOT NULL DEFAULT '',
             turn_counter INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS memory_chunks (
+            id TEXT PRIMARY KEY, branch_id TEXT NOT NULL,
+            content TEXT NOT NULL, embedding TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
     """)
     conn.commit()
     conn.close()
@@ -93,6 +100,9 @@ class RetryMsg(BaseModel):
 
 class BookmarkCreate(BaseModel):
     branch_id: str; label: str
+
+class RestoreHistory(BaseModel):
+    history: list; memory: str = ""; turn_counter: int = 0
 
 # ── SYSTEM PROMPT ─────────────────────────────────────────────────────────────
 CMD_RULES = """
@@ -159,6 +169,44 @@ EMOTIONAL STATE:"""},
     ]
     return client.chat.completions.create(model=model, messages=prompt).choices[0].message.content
 
+# ── RAG (memory chunk embedding + retrieval) ─────────────────────────────────
+_embedder = None
+
+def get_embedder():
+    global _embedder
+    if _embedder is None:
+        from sentence_transformers import SentenceTransformer
+        _embedder = SentenceTransformer(EMBED_MODEL)
+    return _embedder
+
+def embed_text(text: str) -> list:
+    return get_embedder().encode(text).tolist()
+
+def cosine_similarity(a: list, b: list) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = sum(x * x for x in a) ** 0.5
+    norm_b = sum(y * y for y in b) ** 0.5
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+def store_memory_chunk(branch_id: str, content: str):
+    conn = get_db()
+    q(conn, "INSERT INTO memory_chunks VALUES (?,?,?,?,?)",
+      (str(uuid.uuid4()), branch_id, content, json.dumps(embed_text(content)), ts()))
+    conn.commit(); conn.close()
+
+def retrieve_relevant_chunks(branch_id: str, query: str, k: int = RAG_TOP_K) -> list:
+    conn = get_db()
+    chunks = rows(conn, "SELECT content, embedding FROM memory_chunks WHERE branch_id=?", (branch_id,))
+    conn.close()
+    if not chunks:
+        return []
+    query_vec = embed_text(query)
+    scored = [(cosine_similarity(query_vec, json.loads(c["embedding"])), c["content"]) for c in chunks]
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [content for _, content in scored[:k]]
+
 # ── HELPERS ───────────────────────────────────────────────────────────────────
 def ts(): return datetime.utcnow().isoformat()
 
@@ -168,6 +216,8 @@ def get_branch_data(branch_id: str) -> dict:
     conn.close()
     if not b: raise HTTPException(404, "Branch not found")
     b["history"] = json.loads(b["history"])
+    if not b["history"]:
+        b["history"] = []
     return b
 
 def save_branch(branch_id: str, history: list, memory: str, turns: int):
@@ -265,29 +315,48 @@ def clone_chat(chat_id: str, data: Rename):
 # ── SEND (STREAMING) ──────────────────────────────────────────────────────────
 @app.post("/chats/{chat_id}/send")
 async def send_message(chat_id: str, data: SendMsg,
-                       x_hf_token: str = Header(...), x_model: str = Header(default=DEFAULT_MODEL)):
+                       x_hf_token: str = Header(...), x_model: str = Header(default=DEFAULT_MODEL),
+                       x_use_rag: str = Header(default="false")):
     conn = get_db()
     c = row(conn, "SELECT * FROM chats WHERE id=?", (chat_id,))
     if not c: raise HTTPException(404)
     bot = get_bot(c["bot_id"], conn); conn.close()
 
     b = get_branch_data(data.branch_id)
-    b["history"][0] = sys_msg(bot["content"])
+
+    # Guard against empty history
+    if not b["history"]:
+        b["history"] = [sys_msg(bot["content"])]
+    else:
+        b["history"][0] = sys_msg(bot["content"])
 
     cmds = re.findall(r"{([^}]+)}", data.content)
     cleaned = re.sub(r"{[^}]+}", "", data.content).strip()
-    if cmds:
-        b["history"].append({"role": "system", "content": f"COMMAND OVERRIDE\nCommands: {' | '.join(cmds)}"})
-    b["history"].append({"role": "user", "content": cleaned})
 
     resume = resume_injection(b["memory"]) if data.is_first_turn else None
     send_hist = build_send_history(b["history"], b["memory"], resume)
+
+    if x_use_rag.lower() == "true":
+        relevant = retrieve_relevant_chunks(data.branch_id, cleaned)
+        if relevant:
+            send_hist.append({"role": "system", "content": "RELEVANT PAST MEMORY:\n" + "\n---\n".join(relevant)})
+
+    # Commands injected into send_hist only — never saved to permanent history
+    if cmds:
+        override = {"role": "system", "content": f"COMMAND OVERRIDE\nCommands: {' | '.join(cmds)}"}
+        send_hist.append(override)
+
+    send_hist.append({"role": "user", "content": cleaned})
+    b["history"].append({"role": "user", "content": cleaned})
+
     client = InferenceClient(api_key=x_hf_token)
 
     async def stream():
         full = ""
         try:
             for chunk in client.chat.completions.create(model=x_model, messages=send_hist, stream=True):
+                if not chunk.choices:
+                    continue
                 delta = chunk.choices[0].delta.content
                 if delta:
                     full += delta
@@ -320,6 +389,8 @@ async def retry_message(chat_id: str, data: RetryMsg,
         full = ""
         try:
             for chunk in client.chat.completions.create(model=x_model, messages=send_hist, stream=True):
+                if not chunk.choices:
+                    continue
                 delta = chunk.choices[0].delta.content
                 if delta:
                     full += delta
@@ -344,19 +415,22 @@ def undo(branch_id: str):
     h = b["history"]
     if len(h) > 2:
         if h[-1]["role"] == "assistant": h.pop()
-        if h and h[-1]["role"] in ("user",): h.pop()
-        if h and h[-1]["role"] == "system" and "COMMAND OVERRIDE" in h[-1].get("content",""):  h.pop()
+        if h and h[-1]["role"] == "user": h.pop()
+        if h and h[-1]["role"] == "system" and "COMMAND OVERRIDE" in h[-1].get("content", ""): h.pop()
     turns = max(0, b["turn_counter"] - 1)
     save_branch(branch_id, h, b["memory"], turns)
     return {"ok": True, "history": h}
 
 # ── MEMORY ────────────────────────────────────────────────────────────────────
 @app.post("/branches/{branch_id}/memory")
-def update_memory(branch_id: str, x_hf_token: str = Header(...), x_model: str = Header(default=DEFAULT_MODEL)):
+def update_memory(branch_id: str, x_hf_token: str = Header(...), x_model: str = Header(default=DEFAULT_MODEL),
+                  x_use_rag: str = Header(default="false")):
     b = get_branch_data(branch_id)
     try:
         new_mem = do_memory_update(b["history"], b["memory"], x_hf_token, x_model)
         save_branch(branch_id, b["history"], new_mem, b["turn_counter"])
+        if x_use_rag.lower() == "true":
+            store_memory_chunk(branch_id, new_mem)
         return {"ok": True, "memory": new_mem}
     except Exception as e:
         raise HTTPException(500, str(e))
@@ -391,3 +465,109 @@ def restore_bookmark(bookmark_id: str):
 @app.delete("/bookmarks/{bookmark_id}")
 def delete_bookmark(bookmark_id: str):
     conn = get_db(); q(conn, "DELETE FROM bookmarks WHERE id=?", (bookmark_id,)); conn.commit(); conn.close(); return {"ok": True}
+
+
+# ── EDIT MESSAGE IN BRANCH ────────────────────────────────────────────────────
+class EditMessage(BaseModel):
+    visible_index: int  # index in visible (user+assistant only) messages
+    new_content: str
+
+@app.post("/branches/{branch_id}/edit-message")
+def edit_message(branch_id: str, data: EditMessage):
+    b = get_branch_data(branch_id)
+    h = b["history"]
+    # Get visible messages with their actual history indices
+    visible_indices = [i for i, m in enumerate(h) if m["role"] in ("user", "assistant")]
+    if data.visible_index >= len(visible_indices):
+        raise HTTPException(400, "Message index out of range")
+    actual_index = visible_indices[data.visible_index]
+    h[actual_index]["content"] = data.new_content
+    save_branch(branch_id, h, b["memory"], b["turn_counter"])
+    return {"ok": True, "history": h}
+
+
+# ── EDIT USER MESSAGE (streaming, creates new branch) ────────────────────────
+class EditUserMsg(BaseModel):
+    branch_id: str
+    visible_index: int  # index of the user message being edited
+    new_content: str
+
+@app.post("/chats/{chat_id}/edit-user")
+async def edit_user_message(chat_id: str, data: EditUserMsg,
+                            x_hf_token: str = Header(...), x_model: str = Header(default=DEFAULT_MODEL)):
+    parent = get_branch_data(data.branch_id)
+    h = parent["history"]
+
+    # Find actual history index for the visible user message
+    visible_indices = [i for i, m in enumerate(h) if m["role"] in ("user", "assistant")]
+    if data.visible_index >= len(visible_indices):
+        raise HTTPException(400, "Message index out of range")
+    actual_idx = visible_indices[data.visible_index]
+
+    # New history = everything before that user message + edited user message
+    hist_base = h[:actual_idx] + [{"role": "user", "content": data.new_content}]
+    send_hist = build_send_history(hist_base, parent["memory"])
+
+    new_bid = str(uuid.uuid4()); n = ts()
+    client = InferenceClient(api_key=x_hf_token)
+
+    async def stream():
+        full = ""
+        try:
+            for chunk in client.chat.completions.create(model=x_model, messages=send_hist, stream=True):
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta.content
+                if delta:
+                    full += delta
+                    yield f"data: {json.dumps({'type':'delta','content':delta})}\n\n"
+            new_hist = hist_base + [{"role": "assistant", "content": full}]
+            needs_mem = parent["turn_counter"] % MEM_INTERVAL == 0
+            conn = get_db()
+            q(conn, "INSERT INTO branches VALUES (?,?,?,?,?,?,?,?,?)",
+              (new_bid, chat_id, data.branch_id, actual_idx, json.dumps(new_hist), parent["memory"], parent["turn_counter"], n, n))
+            q(conn, "UPDATE chats SET updated_at=? WHERE id=?", (ts(), chat_id))
+            conn.commit(); conn.close()
+            yield f"data: {json.dumps({'type':'done','branch_id':new_bid,'needs_memory':needs_mem})}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'type':'error','message':str(e)})}\n\n"
+
+    return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+# ── TEST CHAT (bare, no bot/memory/system prompt) ─────────────────────────────
+class TestMsg(BaseModel):
+    messages: list  # full conversation history [{role, content}]
+
+@app.post("/test-chat")
+async def test_chat(data: TestMsg,
+                    x_hf_token: str = Header(...),
+                    x_model: str = Header(default=DEFAULT_MODEL)):
+    client = InferenceClient(api_key=x_hf_token)
+
+    async def stream():
+        try:
+            for chunk in client.chat.completions.create(
+                model=x_model, messages=data.messages, stream=True
+            ):
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta.content
+                if delta:
+                    yield f"data: {json.dumps({'type':'delta','content':delta})}\n\n"
+            yield f"data: {json.dumps({'type':'done'})}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'type':'error','message':str(e)})}\n\n"
+
+    return StreamingResponse(stream(), media_type="text/event-stream")
+
+# ── MIGRATION ENDPOINT ────────────────────────────────────────────────────────
+@app.post("/branches/{branch_id}/restore-history")
+def restore_history(branch_id: str, data: RestoreHistory):
+    conn = get_db()
+    exists = conn.execute("SELECT id FROM branches WHERE id=?", (branch_id,)).fetchone()
+    if not exists: raise HTTPException(404, "Branch not found")
+    q(conn, "UPDATE branches SET history=?,memory=?,turn_counter=?,updated_at=? WHERE id=?",
+      (json.dumps(data.history), data.memory, data.turn_counter, ts(), branch_id))
+    conn.commit(); conn.close()
+    return {"ok": True}

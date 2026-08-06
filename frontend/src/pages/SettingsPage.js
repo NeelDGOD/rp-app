@@ -7,6 +7,7 @@ export default function SettingsPage() {
   const [showToken, setShowToken] = useState(false);
   const [model, setModel]       = useState("deepseek-ai/DeepSeek-V3");
   const [autoMem, setAutoMem]   = useState(true);
+  const [useRag, setUseRag]     = useState(false);
   const [fontSize, setFontSize] = useState(17);
   const [savedModels, setSavedModels] = useState([]);
   const [newModelStr, setNewModelStr] = useState("");
@@ -23,6 +24,7 @@ export default function SettingsPage() {
     setToken(localStorage.getItem("hf_token") || "");
     setModel(localStorage.getItem("hf_model") || "deepseek-ai/DeepSeek-V3");
     setAutoMem(localStorage.getItem("auto_memory") !== "false");
+    setUseRag(localStorage.getItem("use_rag") === "true");
     setFontSize(parseInt(localStorage.getItem("font_size") || "17"));
     try {
       const saved = JSON.parse(localStorage.getItem("saved_models") || "[]");
@@ -147,6 +149,21 @@ export default function SettingsPage() {
         <label className="toggle">
           <input type="checkbox" checked={autoMem} onChange={e => {
             setAutoMem(e.target.checked); save("auto_memory", e.target.checked);
+          }} />
+          <div className="toggle-track" />
+          <div className="toggle-thumb" />
+        </label>
+      </div>
+
+      {/* ── RAG MEMORY ── */}
+      <div className="settings-item">
+        <div>
+          <div className="settings-label">Embed Memory for Retrieval</div>
+          <div className="settings-sub">Saves each memory update so old details can be recalled in very long chats</div>
+        </div>
+        <label className="toggle">
+          <input type="checkbox" checked={useRag} onChange={e => {
+            setUseRag(e.target.checked); save("use_rag", e.target.checked);
           }} />
           <div className="toggle-track" />
           <div className="toggle-thumb" />
