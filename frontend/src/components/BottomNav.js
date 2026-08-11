@@ -11,8 +11,8 @@ const tabs = [
 export default function BottomNav() {
   const loc = useLocation();
   const nav = useNavigate();
-  // Hide on individual chat page
-  if (loc.pathname.match(/^\/chats\/.+/)) return null;
+  // Hide on individual chat page and login screen
+  if (loc.pathname.match(/^\/chats\/.+/) || loc.pathname === "/login") return null;
 
   return (
     <nav style={{

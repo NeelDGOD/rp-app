@@ -4,3 +4,4 @@ pydantic==2.7.1
 huggingface-hub==0.23.2
 libsql-experimental==0.0.32
 sentence-transformers==3.0.1
+bcrypt==4.1.3

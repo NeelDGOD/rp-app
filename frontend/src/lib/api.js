@@ -4,11 +4,13 @@ function getHeaders() {
   const token = localStorage.getItem("hf_token") || "";
   const model = localStorage.getItem("hf_model") || "deepseek-ai/DeepSeek-V3";
   const useRag = localStorage.getItem("use_rag") === "true";
+  const authToken = localStorage.getItem("auth_token") || "";
   return {
     "Content-Type": "application/json",
     "x-hf-token": token,
     "x-model": model,
     "x-use-rag": String(useRag),
+    "x-auth-token": authToken,
   };
 }
 
@@ -18,6 +20,10 @@ async function request(method, path, body) {
     headers: getHeaders(),
     body: body ? JSON.stringify(body) : undefined,
   });
+  if (res.status === 401) {
+    localStorage.removeItem("auth_token");
+    localStorage.removeItem("auth_email");
+  }
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
     throw new Error(err.detail || "Request failed");
@@ -26,6 +32,11 @@ async function request(method, path, body) {
 }
 
 export const api = {
+  // Auth
+  login: (email, password) => request("POST", "/auth/login", { email, password }),
+  logout: () => request("POST", "/auth/logout"),
+  me: () => request("GET", "/auth/me"),
+
   // Bots
   getBots: () => request("GET", "/bots"),
   createBot: (data) => request("POST", "/bots", data),

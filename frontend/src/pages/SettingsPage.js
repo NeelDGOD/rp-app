@@ -1,8 +1,10 @@
 import React, { useState, useEffect, useRef } from "react";
-import { Eye, EyeOff, Send, Trash2 } from "lucide-react";
+import { useNavigate } from "react-router-dom";
+import { Eye, EyeOff, Send, Trash2, LogOut } from "lucide-react";
 import { api } from "../lib/api";
 
 export default function SettingsPage() {
+  const nav = useNavigate();
   const [token, setToken]       = useState("");
   const [showToken, setShowToken] = useState(false);
   const [model, setModel]       = useState("deepseek-ai/DeepSeek-V3");
@@ -240,6 +242,24 @@ export default function SettingsPage() {
             </button>
           </div>
         </div>
+      </div>
+
+      <div style={{ height: 1, background: "var(--border)", margin: "4px 0 0" }} />
+
+      {/* ── ACCOUNT ── */}
+      <div className="settings-item">
+        <div>
+          <div className="settings-label">Signed in</div>
+          <div className="settings-sub">{localStorage.getItem("auth_email") || ""}</div>
+        </div>
+        <button className="btn btn-ghost btn-sm" onClick={async () => {
+          try { await api.logout(); } catch {}
+          localStorage.removeItem("auth_token");
+          localStorage.removeItem("auth_email");
+          nav("/login", { replace: true });
+        }}>
+          <LogOut size={14} /> Log out
+        </button>
       </div>
 
       <div style={{ height: 1, background: "var(--border)", margin: "4px 0 0" }} />

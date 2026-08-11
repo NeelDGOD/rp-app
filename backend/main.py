@@ -1,11 +1,12 @@
-import os, re, json, uuid, asyncio
+import os, re, json, uuid, secrets
 from datetime import datetime
-from typing import Optional, AsyncGenerator
-from fastapi import FastAPI, HTTPException, Header
+from typing import Optional
+from fastapi import FastAPI, HTTPException, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from huggingface_hub import InferenceClient
+import bcrypt
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 TURSO_URL   = os.environ.get("TURSO_URL", "file:rp.db")
@@ -15,9 +16,13 @@ MAX_CONTEXT   = 20
 MEM_INTERVAL  = 6
 EMBED_MODEL   = "sentence-transformers/all-MiniLM-L6-v2"
 RAG_TOP_K     = 3
+ADMIN_EMAIL   = "admin@chat.com"
+ADMIN_PASSWORD = "admin"
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+def ts(): return datetime.utcnow().isoformat()
 
 # ── DATABASE ──────────────────────────────────────────────────────────────────
 class _DBConnWrapper:
@@ -48,18 +53,41 @@ def q(conn, sql, params=()):
     cur = conn.execute(sql, params)
     return cur
 
-def rows(conn, sql, params=()):
+# cursor.description is unreliable across libsql_experimental versions (some
+# builds return it empty even for successful SELECT *), so column names are
+# passed explicitly per table instead of introspected from the cursor.
+TABLE_COLS = {
+    "users": ["id", "email", "password_hash", "created_at"],
+    "sessions": ["token", "user_id", "created_at"],
+    "bots": ["id", "name", "content", "created_at", "updated_at", "user_id"],
+    "chats": ["id", "name", "bot_id", "created_at", "updated_at", "user_id"],
+    "branches": ["id", "chat_id", "parent_branch_id", "fork_message_index",
+                 "history", "memory", "turn_counter", "created_at", "updated_at"],
+    "bookmarks": ["id", "chat_id", "branch_id", "label", "history", "memory",
+                  "turn_counter", "created_at"],
+    "memory_chunks": ["id", "branch_id", "content", "embedding", "created_at"],
+}
+
+def rows(conn, sql, params=(), cols=None):
     cur = conn.execute(sql, params)
-    cols = [d[0] for d in cur.description]
+    if cols is None:
+        cols = [d[0] for d in cur.description]
     return [dict(zip(cols, r)) for r in cur.fetchall()]
 
-def row(conn, sql, params=()):
-    r = rows(conn, sql, params)
+def row(conn, sql, params=(), cols=None):
+    r = rows(conn, sql, params, cols)
     return r[0] if r else None
 
 def init_db():
     conn = get_db()
     conn.executescript("""
+        CREATE TABLE IF NOT EXISTS users (
+            id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL, created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS sessions (
+            token TEXT PRIMARY KEY, user_id TEXT NOT NULL, created_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS bots (
             id TEXT PRIMARY KEY, name TEXT NOT NULL, content TEXT NOT NULL,
             created_at TEXT NOT NULL, updated_at TEXT NOT NULL
@@ -90,6 +118,81 @@ def init_db():
     conn.close()
 
 init_db()
+
+# ── AUTH ──────────────────────────────────────────────────────────────────────
+def hash_password(pw: str) -> str:
+    return bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
+
+def verify_password(pw: str, hashed: str) -> bool:
+    return bcrypt.checkpw(pw.encode(), hashed.encode())
+
+def run_migrations():
+    conn = get_db()
+    # bots/chats predate per-user ownership — add the column for older deployments.
+    # CREATE TABLE IF NOT EXISTS above won't add columns to an already-existing table.
+    for stmt in ("ALTER TABLE bots ADD COLUMN user_id TEXT",
+                 "ALTER TABLE chats ADD COLUMN user_id TEXT"):
+        try:
+            conn.execute(stmt)
+        except Exception:
+            pass
+    conn.commit()
+
+    admin = row(conn, "SELECT * FROM users WHERE email=?", (ADMIN_EMAIL,), cols=TABLE_COLS["users"])
+    if admin:
+        admin_id = admin["id"]
+    else:
+        admin_id = str(uuid.uuid4())
+        q(conn, "INSERT INTO users VALUES (?,?,?,?)",
+          (admin_id, ADMIN_EMAIL, hash_password(ADMIN_PASSWORD), ts()))
+        conn.commit()
+
+    # Any bot/chat created before accounts existed belongs to admin.
+    q(conn, "UPDATE bots SET user_id=? WHERE user_id IS NULL OR user_id=''", (admin_id,))
+    q(conn, "UPDATE chats SET user_id=? WHERE user_id IS NULL OR user_id=''", (admin_id,))
+    conn.commit()
+    conn.close()
+
+run_migrations()
+
+def require_user(x_auth_token: str = Header(...)) -> str:
+    conn = get_db()
+    s = row(conn, "SELECT * FROM sessions WHERE token=?", (x_auth_token,), cols=TABLE_COLS["sessions"])
+    conn.close()
+    if not s:
+        raise HTTPException(401, "Invalid or expired session")
+    return s["user_id"]
+
+class LoginReq(BaseModel):
+    email: str
+    password: str
+
+@app.post("/auth/login")
+def login(data: LoginReq):
+    conn = get_db()
+    u = row(conn, "SELECT * FROM users WHERE email=?", (data.email.strip().lower(),), cols=TABLE_COLS["users"])
+    if not u or not verify_password(data.password, u["password_hash"]):
+        conn.close()
+        raise HTTPException(401, "Invalid email or password")
+    token = secrets.token_hex(32)
+    q(conn, "INSERT INTO sessions VALUES (?,?,?)", (token, u["id"], ts()))
+    conn.commit(); conn.close()
+    return {"token": token, "email": u["email"]}
+
+@app.post("/auth/logout")
+def logout(x_auth_token: str = Header(...)):
+    conn = get_db()
+    q(conn, "DELETE FROM sessions WHERE token=?", (x_auth_token,))
+    conn.commit(); conn.close()
+    return {"ok": True}
+
+@app.get("/auth/me")
+def me(user_id: str = Depends(require_user)):
+    conn = get_db()
+    u = row(conn, "SELECT * FROM users WHERE id=?", (user_id,), cols=TABLE_COLS["users"])
+    conn.close()
+    if not u: raise HTTPException(404)
+    return {"email": u["email"]}
 
 # ── MODELS ────────────────────────────────────────────────────────────────────
 class BotCreate(BaseModel):
@@ -210,7 +313,7 @@ def store_memory_chunk(branch_id: str, content: str):
 
 def retrieve_relevant_chunks(branch_id: str, query: str, k: int = RAG_TOP_K) -> list:
     conn = get_db()
-    chunks = rows(conn, "SELECT content, embedding FROM memory_chunks WHERE branch_id=?", (branch_id,))
+    chunks = rows(conn, "SELECT content, embedding FROM memory_chunks WHERE branch_id=?", (branch_id,), cols=["content", "embedding"])
     conn.close()
     if not chunks:
         return []
@@ -220,11 +323,9 @@ def retrieve_relevant_chunks(branch_id: str, query: str, k: int = RAG_TOP_K) -> 
     return [content for _, content in scored[:k]]
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────
-def ts(): return datetime.utcnow().isoformat()
-
 def get_branch_data(branch_id: str) -> dict:
     conn = get_db()
-    b = row(conn, "SELECT * FROM branches WHERE id=?", (branch_id,))
+    b = row(conn, "SELECT * FROM branches WHERE id=?", (branch_id,), cols=TABLE_COLS["branches"])
     conn.close()
     if not b: raise HTTPException(404, "Branch not found")
     b["history"] = json.loads(b["history"])
@@ -238,85 +339,115 @@ def save_branch(branch_id: str, history: list, memory: str, turns: int):
       (json.dumps(history), memory, turns, ts(), branch_id))
     conn.commit(); conn.close()
 
-def get_bot(bot_id: str, conn=None) -> dict:
+def get_bot(bot_id: str, conn=None, user_id: str = None) -> dict:
     close = conn is None
     if close: conn = get_db()
-    b = row(conn, "SELECT * FROM bots WHERE id=?", (bot_id,))
+    b = row(conn, "SELECT * FROM bots WHERE id=?", (bot_id,), cols=TABLE_COLS["bots"])
     if close: conn.close()
-    if not b: raise HTTPException(404, "Bot not found")
+    if not b or (user_id is not None and b["user_id"] != user_id):
+        raise HTTPException(404, "Bot not found")
     return b
+
+def chat_owned(chat_id: str, user_id: str, conn=None) -> dict:
+    close = conn is None
+    if close: conn = get_db()
+    c = row(conn, "SELECT * FROM chats WHERE id=?", (chat_id,), cols=TABLE_COLS["chats"])
+    if close: conn.close()
+    if not c or c["user_id"] != user_id:
+        raise HTTPException(404, "Chat not found")
+    return c
+
+def branch_owned(branch_id: str, user_id: str) -> dict:
+    conn = get_db()
+    b = row(conn, "SELECT * FROM branches WHERE id=?", (branch_id,), cols=TABLE_COLS["branches"])
+    conn.close()
+    if not b: raise HTTPException(404, "Branch not found")
+    chat_owned(b["chat_id"], user_id)
+    return b
+
+def bookmark_owned(bookmark_id: str, user_id: str) -> dict:
+    conn = get_db()
+    bm = row(conn, "SELECT * FROM bookmarks WHERE id=?", (bookmark_id,), cols=TABLE_COLS["bookmarks"])
+    conn.close()
+    if not bm: raise HTTPException(404, "Bookmark not found")
+    chat_owned(bm["chat_id"], user_id)
+    return bm
 
 # ── BOTS ──────────────────────────────────────────────────────────────────────
 @app.get("/bots")
-def list_bots():
-    conn = get_db(); r = rows(conn, "SELECT * FROM bots ORDER BY name"); conn.close(); return r
+def list_bots(user_id: str = Depends(require_user)):
+    conn = get_db()
+    r = rows(conn, "SELECT * FROM bots WHERE user_id=? ORDER BY name", (user_id,), cols=TABLE_COLS["bots"])
+    conn.close(); return r
 
 @app.post("/bots")
-def create_bot(data: BotCreate):
+def create_bot(data: BotCreate, user_id: str = Depends(require_user)):
     conn = get_db(); bid = str(uuid.uuid4()); n = ts()
-    q(conn, "INSERT INTO bots VALUES (?,?,?,?,?)", (bid, data.name, data.content, n, n))
+    q(conn, "INSERT INTO bots VALUES (?,?,?,?,?,?)", (bid, data.name, data.content, n, n, user_id))
     conn.commit(); conn.close()
     return {"id": bid, "name": data.name, "content": data.content, "created_at": n, "updated_at": n}
 
 @app.put("/bots/{bot_id}")
-def update_bot(bot_id: str, data: BotUpdate):
-    conn = get_db(); b = get_bot(bot_id, conn)
+def update_bot(bot_id: str, data: BotUpdate, user_id: str = Depends(require_user)):
+    conn = get_db(); b = get_bot(bot_id, conn, user_id)
     name = data.name or b["name"]; content = data.content or b["content"]
     q(conn, "UPDATE bots SET name=?,content=?,updated_at=? WHERE id=?", (name, content, ts(), bot_id))
     conn.commit(); conn.close()
     return {"id": bot_id, "name": name, "content": content}
 
 @app.delete("/bots/{bot_id}")
-def delete_bot(bot_id: str):
-    conn = get_db(); q(conn, "DELETE FROM bots WHERE id=?", (bot_id,)); conn.commit(); conn.close(); return {"ok": True}
+def delete_bot(bot_id: str, user_id: str = Depends(require_user)):
+    conn = get_db(); get_bot(bot_id, conn, user_id)
+    q(conn, "DELETE FROM bots WHERE id=?", (bot_id,)); conn.commit(); conn.close(); return {"ok": True}
 
 # ── CHATS ─────────────────────────────────────────────────────────────────────
 @app.get("/chats")
-def list_chats():
-    conn = get_db(); r = rows(conn, "SELECT * FROM chats ORDER BY updated_at DESC"); conn.close(); return r
+def list_chats(user_id: str = Depends(require_user)):
+    conn = get_db()
+    r = rows(conn, "SELECT * FROM chats WHERE user_id=? ORDER BY updated_at DESC", (user_id,), cols=TABLE_COLS["chats"])
+    conn.close(); return r
 
 @app.post("/chats")
-def create_chat(data: ChatCreate):
+def create_chat(data: ChatCreate, user_id: str = Depends(require_user)):
     conn = get_db(); cid = str(uuid.uuid4()); bid = str(uuid.uuid4()); n = ts()
-    bot = get_bot(data.bot_id, conn)
+    bot = get_bot(data.bot_id, conn, user_id)
     init_hist = json.dumps([sys_msg(bot["content"])])
-    q(conn, "INSERT INTO chats VALUES (?,?,?,?,?)", (cid, data.name, data.bot_id, n, n))
+    q(conn, "INSERT INTO chats VALUES (?,?,?,?,?,?)", (cid, data.name, data.bot_id, n, n, user_id))
     q(conn, "INSERT INTO branches VALUES (?,?,?,?,?,?,?,?,?)", (bid, cid, None, 0, init_hist, "", 0, n, n))
     conn.commit(); conn.close()
     return {"id": cid, "name": data.name, "bot_id": data.bot_id, "root_branch_id": bid, "created_at": n}
 
 @app.get("/chats/{chat_id}")
-def get_chat(chat_id: str):
+def get_chat(chat_id: str, user_id: str = Depends(require_user)):
     conn = get_db()
-    c = row(conn, "SELECT * FROM chats WHERE id=?", (chat_id,))
-    if not c: raise HTTPException(404, "Chat not found")
-    bs = rows(conn, "SELECT * FROM branches WHERE chat_id=? ORDER BY created_at", (chat_id,))
+    c = chat_owned(chat_id, user_id, conn)
+    bs = rows(conn, "SELECT * FROM branches WHERE chat_id=? ORDER BY created_at", (chat_id,), cols=TABLE_COLS["branches"])
     conn.close()
     for b in bs: b["history"] = json.loads(b["history"])
     c["branches"] = bs
     return c
 
 @app.put("/chats/{chat_id}/rename")
-def rename_chat(chat_id: str, data: Rename):
-    conn = get_db(); q(conn, "UPDATE chats SET name=?,updated_at=? WHERE id=?", (data.name, ts(), chat_id))
+def rename_chat(chat_id: str, data: Rename, user_id: str = Depends(require_user)):
+    conn = get_db(); chat_owned(chat_id, user_id, conn)
+    q(conn, "UPDATE chats SET name=?,updated_at=? WHERE id=?", (data.name, ts(), chat_id))
     conn.commit(); conn.close(); return {"ok": True}
 
 @app.delete("/chats/{chat_id}")
-def delete_chat(chat_id: str):
-    conn = get_db()
+def delete_chat(chat_id: str, user_id: str = Depends(require_user)):
+    conn = get_db(); chat_owned(chat_id, user_id, conn)
     for tbl in ("bookmarks", "branches", "chats"):
         q(conn, f"DELETE FROM {tbl} WHERE {'chat_id' if tbl!='chats' else 'id'}=?", (chat_id,))
     conn.commit(); conn.close(); return {"ok": True}
 
 @app.post("/chats/{chat_id}/clone")
-def clone_chat(chat_id: str, data: Rename):
+def clone_chat(chat_id: str, data: Rename, user_id: str = Depends(require_user)):
     conn = get_db()
-    c = row(conn, "SELECT * FROM chats WHERE id=?", (chat_id,))
-    if not c: raise HTTPException(404)
-    bs = rows(conn, "SELECT * FROM branches WHERE chat_id=?", (chat_id,))
+    c = chat_owned(chat_id, user_id, conn)
+    bs = rows(conn, "SELECT * FROM branches WHERE chat_id=?", (chat_id,), cols=TABLE_COLS["branches"])
     new_cid = str(uuid.uuid4()); n = ts()
     id_map = {b["id"]: str(uuid.uuid4()) for b in bs}
-    q(conn, "INSERT INTO chats VALUES (?,?,?,?,?)", (new_cid, data.name, c["bot_id"], n, n))
+    q(conn, "INSERT INTO chats VALUES (?,?,?,?,?,?)", (new_cid, data.name, c["bot_id"], n, n, user_id))
     for b in bs:
         np = id_map.get(b["parent_branch_id"]) if b["parent_branch_id"] else None
         q(conn, "INSERT INTO branches VALUES (?,?,?,?,?,?,?,?,?)",
@@ -328,10 +459,10 @@ def clone_chat(chat_id: str, data: Rename):
 @app.post("/chats/{chat_id}/send")
 async def send_message(chat_id: str, data: SendMsg,
                        x_hf_token: str = Header(...), x_model: str = Header(default=DEFAULT_MODEL),
-                       x_use_rag: str = Header(default="false")):
+                       x_use_rag: str = Header(default="false"),
+                       user_id: str = Depends(require_user)):
     conn = get_db()
-    c = row(conn, "SELECT * FROM chats WHERE id=?", (chat_id,))
-    if not c: raise HTTPException(404)
+    c = chat_owned(chat_id, user_id, conn)
     bot = get_bot(c["bot_id"], conn); conn.close()
 
     b = get_branch_data(data.branch_id)
@@ -387,7 +518,9 @@ async def send_message(chat_id: str, data: SendMsg,
 # ── RETRY (NEW BRANCH) ────────────────────────────────────────────────────────
 @app.post("/chats/{chat_id}/retry")
 async def retry_message(chat_id: str, data: RetryMsg,
-                        x_hf_token: str = Header(...), x_model: str = Header(default=DEFAULT_MODEL)):
+                        x_hf_token: str = Header(...), x_model: str = Header(default=DEFAULT_MODEL),
+                        user_id: str = Depends(require_user)):
+    chat_owned(chat_id, user_id)
     parent = get_branch_data(data.branch_id)
     hist_base = parent["history"][:-1] if parent["history"] and parent["history"][-1]["role"] == "assistant" else parent["history"]
     send_hist = build_send_history(hist_base, parent["memory"])
@@ -422,7 +555,8 @@ async def retry_message(chat_id: str, data: RetryMsg,
 
 # ── UNDO ──────────────────────────────────────────────────────────────────────
 @app.post("/branches/{branch_id}/undo")
-def undo(branch_id: str):
+def undo(branch_id: str, user_id: str = Depends(require_user)):
+    branch_owned(branch_id, user_id)
     b = get_branch_data(branch_id)
     h = b["history"]
     if len(h) > 2:
@@ -436,7 +570,8 @@ def undo(branch_id: str):
 # ── MEMORY ────────────────────────────────────────────────────────────────────
 @app.post("/branches/{branch_id}/memory")
 def update_memory(branch_id: str, x_hf_token: str = Header(...), x_model: str = Header(default=DEFAULT_MODEL),
-                  x_use_rag: str = Header(default="false")):
+                  x_use_rag: str = Header(default="false"), user_id: str = Depends(require_user)):
+    branch_owned(branch_id, user_id)
     b = get_branch_data(branch_id)
     try:
         new_mem = do_memory_update(b["history"], b["memory"], x_hf_token, x_model)
@@ -449,13 +584,17 @@ def update_memory(branch_id: str, x_hf_token: str = Header(...), x_model: str = 
 
 # ── BOOKMARKS ─────────────────────────────────────────────────────────────────
 @app.get("/chats/{chat_id}/bookmarks")
-def list_bookmarks(chat_id: str):
-    conn = get_db(); r = rows(conn, "SELECT * FROM bookmarks WHERE chat_id=? ORDER BY created_at DESC", (chat_id,)); conn.close()
+def list_bookmarks(chat_id: str, user_id: str = Depends(require_user)):
+    chat_owned(chat_id, user_id)
+    conn = get_db()
+    r = rows(conn, "SELECT * FROM bookmarks WHERE chat_id=? ORDER BY created_at DESC", (chat_id,), cols=TABLE_COLS["bookmarks"])
+    conn.close()
     for bm in r: bm["history"] = json.loads(bm["history"])
     return r
 
 @app.post("/chats/{chat_id}/bookmarks")
-def create_bookmark(chat_id: str, data: BookmarkCreate):
+def create_bookmark(chat_id: str, data: BookmarkCreate, user_id: str = Depends(require_user)):
+    chat_owned(chat_id, user_id)
     b = get_branch_data(data.branch_id)
     conn = get_db(); bm_id = str(uuid.uuid4()); n = ts()
     q(conn, "INSERT INTO bookmarks VALUES (?,?,?,?,?,?,?,?)",
@@ -464,10 +603,9 @@ def create_bookmark(chat_id: str, data: BookmarkCreate):
     return {"id": bm_id, "label": data.label, "created_at": n}
 
 @app.post("/bookmarks/{bookmark_id}/restore")
-def restore_bookmark(bookmark_id: str):
+def restore_bookmark(bookmark_id: str, user_id: str = Depends(require_user)):
+    bm = bookmark_owned(bookmark_id, user_id)
     conn = get_db()
-    bm = row(conn, "SELECT * FROM bookmarks WHERE id=?", (bookmark_id,))
-    if not bm: raise HTTPException(404)
     new_bid = str(uuid.uuid4()); n = ts()
     q(conn, "INSERT INTO branches VALUES (?,?,?,?,?,?,?,?,?)",
       (new_bid, bm["chat_id"], None, 0, bm["history"], bm["memory"], bm["turn_counter"], n, n))
@@ -475,7 +613,8 @@ def restore_bookmark(bookmark_id: str):
     return {"branch_id": new_bid}
 
 @app.delete("/bookmarks/{bookmark_id}")
-def delete_bookmark(bookmark_id: str):
+def delete_bookmark(bookmark_id: str, user_id: str = Depends(require_user)):
+    bookmark_owned(bookmark_id, user_id)
     conn = get_db(); q(conn, "DELETE FROM bookmarks WHERE id=?", (bookmark_id,)); conn.commit(); conn.close(); return {"ok": True}
 
 
@@ -485,7 +624,8 @@ class EditMessage(BaseModel):
     new_content: str
 
 @app.post("/branches/{branch_id}/edit-message")
-def edit_message(branch_id: str, data: EditMessage):
+def edit_message(branch_id: str, data: EditMessage, user_id: str = Depends(require_user)):
+    branch_owned(branch_id, user_id)
     b = get_branch_data(branch_id)
     h = b["history"]
     # Get visible messages with their actual history indices
@@ -506,7 +646,9 @@ class EditUserMsg(BaseModel):
 
 @app.post("/chats/{chat_id}/edit-user")
 async def edit_user_message(chat_id: str, data: EditUserMsg,
-                            x_hf_token: str = Header(...), x_model: str = Header(default=DEFAULT_MODEL)):
+                            x_hf_token: str = Header(...), x_model: str = Header(default=DEFAULT_MODEL),
+                            user_id: str = Depends(require_user)):
+    chat_owned(chat_id, user_id)
     parent = get_branch_data(data.branch_id)
     h = parent["history"]
 
@@ -554,7 +696,8 @@ class TestMsg(BaseModel):
 @app.post("/test-chat")
 async def test_chat(data: TestMsg,
                     x_hf_token: str = Header(...),
-                    x_model: str = Header(default=DEFAULT_MODEL)):
+                    x_model: str = Header(default=DEFAULT_MODEL),
+                    user_id: str = Depends(require_user)):
     client = InferenceClient(api_key=x_hf_token)
 
     async def stream():
@@ -575,10 +718,9 @@ async def test_chat(data: TestMsg,
 
 # ── MIGRATION ENDPOINT ────────────────────────────────────────────────────────
 @app.post("/branches/{branch_id}/restore-history")
-def restore_history(branch_id: str, data: RestoreHistory):
+def restore_history(branch_id: str, data: RestoreHistory, user_id: str = Depends(require_user)):
+    branch_owned(branch_id, user_id)
     conn = get_db()
-    exists = conn.execute("SELECT id FROM branches WHERE id=?", (branch_id,)).fetchone()
-    if not exists: raise HTTPException(404, "Branch not found")
     q(conn, "UPDATE branches SET history=?,memory=?,turn_counter=?,updated_at=? WHERE id=?",
       (json.dumps(data.history), data.memory, data.turn_counter, ts(), branch_id))
     conn.commit(); conn.close()
