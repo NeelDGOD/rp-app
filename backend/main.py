@@ -167,6 +167,25 @@ class LoginReq(BaseModel):
     email: str
     password: str
 
+@app.post("/auth/register")
+def register(data: LoginReq):
+    email = data.email.strip().lower()
+    if "@" not in email:
+        raise HTTPException(400, "Invalid email")
+    if len(data.password) < 4:
+        raise HTTPException(400, "Password must be at least 4 characters")
+    conn = get_db()
+    existing = row(conn, "SELECT * FROM users WHERE email=?", (email,), cols=TABLE_COLS["users"])
+    if existing:
+        conn.close()
+        raise HTTPException(400, "An account with that email already exists")
+    uid = str(uuid.uuid4())
+    q(conn, "INSERT INTO users VALUES (?,?,?,?)", (uid, email, hash_password(data.password), ts()))
+    token = secrets.token_hex(32)
+    q(conn, "INSERT INTO sessions VALUES (?,?,?)", (token, uid, ts()))
+    conn.commit(); conn.close()
+    return {"token": token, "email": email}
+
 @app.post("/auth/login")
 def login(data: LoginReq):
     conn = get_db()
