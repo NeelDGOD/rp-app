@@ -62,7 +62,7 @@ TABLE_COLS = {
     "bots": ["id", "name", "content", "created_at", "updated_at", "user_id"],
     "chats": ["id", "name", "bot_id", "created_at", "updated_at", "user_id"],
     "branches": ["id", "chat_id", "parent_branch_id", "fork_message_index",
-                 "history", "memory", "turn_counter", "created_at", "updated_at"],
+                 "history", "memory", "turn_counter", "created_at", "updated_at", "director_note"],
     "bookmarks": ["id", "chat_id", "branch_id", "label", "history", "memory",
                   "turn_counter", "created_at"],
     "memory_chunks": ["id", "branch_id", "content", "embedding", "created_at"],
@@ -101,7 +101,8 @@ def init_db():
             parent_branch_id TEXT, fork_message_index INTEGER NOT NULL DEFAULT 0,
             history TEXT NOT NULL DEFAULT '[]', memory TEXT NOT NULL DEFAULT '',
             turn_counter INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+            director_note TEXT NOT NULL DEFAULT ''
         );
         CREATE TABLE IF NOT EXISTS bookmarks (
             id TEXT PRIMARY KEY, chat_id TEXT NOT NULL, branch_id TEXT NOT NULL,
@@ -131,7 +132,8 @@ def run_migrations():
     # bots/chats predate per-user ownership — add the column for older deployments.
     # CREATE TABLE IF NOT EXISTS above won't add columns to an already-existing table.
     for stmt in ("ALTER TABLE bots ADD COLUMN user_id TEXT",
-                 "ALTER TABLE chats ADD COLUMN user_id TEXT"):
+                 "ALTER TABLE chats ADD COLUMN user_id TEXT",
+                 "ALTER TABLE branches ADD COLUMN director_note TEXT NOT NULL DEFAULT ''"):
         try:
             conn.execute(stmt)
         except Exception:
@@ -282,14 +284,34 @@ def build_send_history(history: list, memory: str, resume: Optional[dict] = None
         send.insert(i, resume)
     return send
 
-def do_memory_update(history: list, current_memory: str, token: str, model: str) -> str:
-    client = InferenceClient(api_key=token)
+def hf_client(token: str, model: str):
+    """Split a "repo_id:provider" model string (as copied from HF's model page)
+    into a client configured for that provider and the bare repo_id."""
+    if ":" in model:
+        repo_id, provider = model.split(":", 1)
+    else:
+        repo_id, provider = model, "auto"
+    return InferenceClient(provider=provider, api_key=token), repo_id
+
+def do_memory_update(history: list, current_memory: str, token: str, model: str, director_note: str = "") -> tuple:
+    client, model = hf_client(token, model)
     text = "\n".join(
         f"{'User' if m['role']=='user' else 'Bot'}: {m['content']}"
         for m in history[-20:] if m["role"] in ("user", "assistant")
     )
+    directive_block = ""
+    if director_note:
+        directive_block = f"""
+
+ACTIVE DIRECTOR NOTE (an out-of-character instruction currently overriding the character's default behavior): "{director_note}"
+Judge from the NEW CONVERSATION whether this note still applies to the current scene, or whether the moment it
+was about has clearly passed. After the memory document, add exactly one final line, nothing after it:
+DIRECTOR_NOTE: KEEP
+or
+DIRECTOR_NOTE: DROP"""
+
     prompt = [
-        {"role": "system", "content": """Maintain a persistent memory document for an ongoing roleplay.
+        {"role": "system", "content": f"""Maintain a persistent memory document for an ongoing roleplay.
 Given EXISTING memory + NEW conversation, return a fully UPDATED memory document.
 NEVER remove old info. Only add or update. Output ONLY the memory document in this structure:
 
@@ -298,10 +320,18 @@ RELATIONSHIP:
 KEY EVENTS:
 PROMISES & SECRETS:
 CURRENT SCENE:
-EMOTIONAL STATE:"""},
+EMOTIONAL STATE:{directive_block}"""},
         {"role": "user", "content": f"EXISTING MEMORY:\n{current_memory or '(none yet)'}\n\nNEW CONVERSATION:\n{text}\n\nReturn the fully updated memory document."}
     ]
-    return client.chat.completions.create(model=model, messages=prompt).choices[0].message.content
+    raw = client.chat.completions.create(model=model, messages=prompt).choices[0].message.content
+
+    new_note = director_note
+    m = re.search(r"DIRECTOR_NOTE:\s*(KEEP|DROP)", raw, re.IGNORECASE)
+    if m:
+        raw = raw[:m.start()].rstrip()
+        if m.group(1).upper() == "DROP":
+            new_note = ""
+    return raw, new_note
 
 # ── RAG (memory chunk embedding + retrieval) ─────────────────────────────────
 _embedder = None
@@ -352,10 +382,10 @@ def get_branch_data(branch_id: str) -> dict:
         b["history"] = []
     return b
 
-def save_branch(branch_id: str, history: list, memory: str, turns: int):
+def save_branch(branch_id: str, history: list, memory: str, turns: int, director_note: str):
     conn = get_db()
-    q(conn, "UPDATE branches SET history=?,memory=?,turn_counter=?,updated_at=? WHERE id=?",
-      (json.dumps(history), memory, turns, ts(), branch_id))
+    q(conn, "UPDATE branches SET history=?,memory=?,turn_counter=?,director_note=?,updated_at=? WHERE id=?",
+      (json.dumps(history), memory, turns, director_note, ts(), branch_id))
     conn.commit(); conn.close()
 
 def get_bot(bot_id: str, conn=None, user_id: str = None) -> dict:
@@ -432,7 +462,7 @@ def create_chat(data: ChatCreate, user_id: str = Depends(require_user)):
     bot = get_bot(data.bot_id, conn, user_id)
     init_hist = json.dumps([sys_msg(bot["content"])])
     q(conn, "INSERT INTO chats VALUES (?,?,?,?,?,?)", (cid, data.name, data.bot_id, n, n, user_id))
-    q(conn, "INSERT INTO branches VALUES (?,?,?,?,?,?,?,?,?)", (bid, cid, None, 0, init_hist, "", 0, n, n))
+    q(conn, "INSERT INTO branches VALUES (?,?,?,?,?,?,?,?,?,?)", (bid, cid, "", 0, init_hist, "", 0, n, n, ""))
     conn.commit(); conn.close()
     return {"id": cid, "name": data.name, "bot_id": data.bot_id, "root_branch_id": bid, "created_at": n}
 
@@ -468,9 +498,9 @@ def clone_chat(chat_id: str, data: Rename, user_id: str = Depends(require_user))
     id_map = {b["id"]: str(uuid.uuid4()) for b in bs}
     q(conn, "INSERT INTO chats VALUES (?,?,?,?,?,?)", (new_cid, data.name, c["bot_id"], n, n, user_id))
     for b in bs:
-        np = id_map.get(b["parent_branch_id"]) if b["parent_branch_id"] else None
-        q(conn, "INSERT INTO branches VALUES (?,?,?,?,?,?,?,?,?)",
-          (id_map[b["id"]], new_cid, np, b["fork_message_index"], b["history"], b["memory"], b["turn_counter"], n, n))
+        np = id_map.get(b["parent_branch_id"]) if b["parent_branch_id"] else ""
+        q(conn, "INSERT INTO branches VALUES (?,?,?,?,?,?,?,?,?,?)",
+          (id_map[b["id"]], new_cid, np, b["fork_message_index"], b["history"], b["memory"], b["turn_counter"], n, n, b["director_note"]))
     conn.commit(); conn.close()
     return {"id": new_cid, "name": data.name}
 
@@ -495,6 +525,20 @@ async def send_message(chat_id: str, data: SendMsg,
     cmds = re.findall(r"{([^}]+)}", data.content)
     cleaned = re.sub(r"{[^}]+}", "", data.content).strip()
 
+    # {direct: ...} sets a sticky director note that stays in effect (re-injected every
+    # turn) until replaced or cleared with {normal}/{reset} — unlike the other one-shot
+    # commands below, which only apply to this single message.
+    oneshot_cmds = []
+    for c in cmds:
+        stripped = c.strip()
+        m = re.match(r"direct:\s*(.+)", stripped, re.IGNORECASE)
+        if m:
+            b["director_note"] = m.group(1).strip()
+        elif stripped.lower() in ("normal", "reset"):
+            b["director_note"] = ""
+        else:
+            oneshot_cmds.append(stripped)
+
     resume = resume_injection(b["memory"]) if data.is_first_turn else None
     send_hist = build_send_history(b["history"], b["memory"], resume)
 
@@ -503,20 +547,23 @@ async def send_message(chat_id: str, data: SendMsg,
         if relevant:
             send_hist.append({"role": "system", "content": "RELEVANT PAST MEMORY:\n" + "\n---\n".join(relevant)})
 
-    # Commands injected into send_hist only — never saved to permanent history
-    if cmds:
-        override = {"role": "system", "content": f"COMMAND OVERRIDE\nCommands: {' | '.join(cmds)}"}
+    if b["director_note"]:
+        send_hist.append({"role": "system", "content": f"ONGOING DIRECTOR NOTE (stays in effect until the user changes or clears it): {b['director_note']}"})
+
+    # One-shot commands injected into send_hist only — never saved to permanent history
+    if oneshot_cmds:
+        override = {"role": "system", "content": f"COMMAND OVERRIDE\nCommands: {' | '.join(oneshot_cmds)}"}
         send_hist.append(override)
 
     send_hist.append({"role": "user", "content": cleaned})
     b["history"].append({"role": "user", "content": cleaned})
 
-    client = InferenceClient(api_key=x_hf_token)
+    client, model = hf_client(x_hf_token, x_model)
 
     async def stream():
         full = ""
         try:
-            for chunk in client.chat.completions.create(model=x_model, messages=send_hist, stream=True):
+            for chunk in client.chat.completions.create(model=model, messages=send_hist, stream=True):
                 if not chunk.choices:
                     continue
                 delta = chunk.choices[0].delta.content
@@ -526,7 +573,7 @@ async def send_message(chat_id: str, data: SendMsg,
             b["history"].append({"role": "assistant", "content": full})
             b["turn_counter"] += 1
             needs_mem = b["turn_counter"] % MEM_INTERVAL == 0
-            save_branch(data.branch_id, b["history"], b["memory"], b["turn_counter"])
+            save_branch(data.branch_id, b["history"], b["memory"], b["turn_counter"], b["director_note"])
             conn2 = get_db(); q(conn2, "UPDATE chats SET updated_at=? WHERE id=?", (ts(), chat_id)); conn2.commit(); conn2.close()
             yield f"data: {json.dumps({'type':'done','needs_memory':needs_mem,'turn_counter':b['turn_counter']})}\n\n"
         except Exception as e:
@@ -543,16 +590,18 @@ async def retry_message(chat_id: str, data: RetryMsg,
     parent = get_branch_data(data.branch_id)
     hist_base = parent["history"][:-1] if parent["history"] and parent["history"][-1]["role"] == "assistant" else parent["history"]
     send_hist = build_send_history(hist_base, parent["memory"])
+    if parent["director_note"]:
+        send_hist.append({"role": "system", "content": f"ONGOING DIRECTOR NOTE (stays in effect until the user changes or clears it): {parent['director_note']}"})
     if data.hint:
         send_hist.append({"role": "system", "content": f"RETRY DIRECTION: {data.hint}"})
 
     new_bid = str(uuid.uuid4()); n = ts()
-    client = InferenceClient(api_key=x_hf_token)
+    client, model = hf_client(x_hf_token, x_model)
 
     async def stream():
         full = ""
         try:
-            for chunk in client.chat.completions.create(model=x_model, messages=send_hist, stream=True):
+            for chunk in client.chat.completions.create(model=model, messages=send_hist, stream=True):
                 if not chunk.choices:
                     continue
                 delta = chunk.choices[0].delta.content
@@ -562,8 +611,8 @@ async def retry_message(chat_id: str, data: RetryMsg,
             new_hist = hist_base + [{"role": "assistant", "content": full}]
             needs_mem = parent["turn_counter"] % MEM_INTERVAL == 0
             conn = get_db()
-            q(conn, "INSERT INTO branches VALUES (?,?,?,?,?,?,?,?,?)",
-              (new_bid, chat_id, data.branch_id, len(hist_base), json.dumps(new_hist), parent["memory"], parent["turn_counter"], n, n))
+            q(conn, "INSERT INTO branches VALUES (?,?,?,?,?,?,?,?,?,?)",
+              (new_bid, chat_id, data.branch_id, len(hist_base), json.dumps(new_hist), parent["memory"], parent["turn_counter"], n, n, parent["director_note"]))
             q(conn, "UPDATE chats SET updated_at=? WHERE id=?", (ts(), chat_id))
             conn.commit(); conn.close()
             yield f"data: {json.dumps({'type':'done','branch_id':new_bid,'needs_memory':needs_mem})}\n\n"
@@ -583,7 +632,7 @@ def undo(branch_id: str, user_id: str = Depends(require_user)):
         if h and h[-1]["role"] == "user": h.pop()
         if h and h[-1]["role"] == "system" and "COMMAND OVERRIDE" in h[-1].get("content", ""): h.pop()
     turns = max(0, b["turn_counter"] - 1)
-    save_branch(branch_id, h, b["memory"], turns)
+    save_branch(branch_id, h, b["memory"], turns, b["director_note"])
     return {"ok": True, "history": h}
 
 # ── MEMORY ────────────────────────────────────────────────────────────────────
@@ -593,11 +642,11 @@ def update_memory(branch_id: str, x_hf_token: str = Header(...), x_model: str = 
     branch_owned(branch_id, user_id)
     b = get_branch_data(branch_id)
     try:
-        new_mem = do_memory_update(b["history"], b["memory"], x_hf_token, x_model)
-        save_branch(branch_id, b["history"], new_mem, b["turn_counter"])
+        new_mem, new_note = do_memory_update(b["history"], b["memory"], x_hf_token, x_model, b["director_note"])
+        save_branch(branch_id, b["history"], new_mem, b["turn_counter"], new_note)
         if x_use_rag.lower() == "true":
             store_memory_chunk(branch_id, new_mem)
-        return {"ok": True, "memory": new_mem}
+        return {"ok": True, "memory": new_mem, "director_note": new_note}
     except Exception as e:
         raise HTTPException(500, str(e))
 
@@ -626,8 +675,8 @@ def restore_bookmark(bookmark_id: str, user_id: str = Depends(require_user)):
     bm = bookmark_owned(bookmark_id, user_id)
     conn = get_db()
     new_bid = str(uuid.uuid4()); n = ts()
-    q(conn, "INSERT INTO branches VALUES (?,?,?,?,?,?,?,?,?)",
-      (new_bid, bm["chat_id"], None, 0, bm["history"], bm["memory"], bm["turn_counter"], n, n))
+    q(conn, "INSERT INTO branches VALUES (?,?,?,?,?,?,?,?,?,?)",
+      (new_bid, bm["chat_id"], "", 0, bm["history"], bm["memory"], bm["turn_counter"], n, n, ""))
     conn.commit(); conn.close()
     return {"branch_id": new_bid}
 
@@ -653,7 +702,7 @@ def edit_message(branch_id: str, data: EditMessage, user_id: str = Depends(requi
         raise HTTPException(400, "Message index out of range")
     actual_index = visible_indices[data.visible_index]
     h[actual_index]["content"] = data.new_content
-    save_branch(branch_id, h, b["memory"], b["turn_counter"])
+    save_branch(branch_id, h, b["memory"], b["turn_counter"], b["director_note"])
     return {"ok": True, "history": h}
 
 
@@ -680,14 +729,16 @@ async def edit_user_message(chat_id: str, data: EditUserMsg,
     # New history = everything before that user message + edited user message
     hist_base = h[:actual_idx] + [{"role": "user", "content": data.new_content}]
     send_hist = build_send_history(hist_base, parent["memory"])
+    if parent["director_note"]:
+        send_hist.append({"role": "system", "content": f"ONGOING DIRECTOR NOTE (stays in effect until the user changes or clears it): {parent['director_note']}"})
 
     new_bid = str(uuid.uuid4()); n = ts()
-    client = InferenceClient(api_key=x_hf_token)
+    client, model = hf_client(x_hf_token, x_model)
 
     async def stream():
         full = ""
         try:
-            for chunk in client.chat.completions.create(model=x_model, messages=send_hist, stream=True):
+            for chunk in client.chat.completions.create(model=model, messages=send_hist, stream=True):
                 if not chunk.choices:
                     continue
                 delta = chunk.choices[0].delta.content
@@ -697,8 +748,8 @@ async def edit_user_message(chat_id: str, data: EditUserMsg,
             new_hist = hist_base + [{"role": "assistant", "content": full}]
             needs_mem = parent["turn_counter"] % MEM_INTERVAL == 0
             conn = get_db()
-            q(conn, "INSERT INTO branches VALUES (?,?,?,?,?,?,?,?,?)",
-              (new_bid, chat_id, data.branch_id, actual_idx, json.dumps(new_hist), parent["memory"], parent["turn_counter"], n, n))
+            q(conn, "INSERT INTO branches VALUES (?,?,?,?,?,?,?,?,?,?)",
+              (new_bid, chat_id, data.branch_id, actual_idx, json.dumps(new_hist), parent["memory"], parent["turn_counter"], n, n, parent["director_note"]))
             q(conn, "UPDATE chats SET updated_at=? WHERE id=?", (ts(), chat_id))
             conn.commit(); conn.close()
             yield f"data: {json.dumps({'type':'done','branch_id':new_bid,'needs_memory':needs_mem})}\n\n"
@@ -717,12 +768,12 @@ async def test_chat(data: TestMsg,
                     x_hf_token: str = Header(...),
                     x_model: str = Header(default=DEFAULT_MODEL),
                     user_id: str = Depends(require_user)):
-    client = InferenceClient(api_key=x_hf_token)
+    client, model = hf_client(x_hf_token, x_model)
 
     async def stream():
         try:
             for chunk in client.chat.completions.create(
-                model=x_model, messages=data.messages, stream=True
+                model=model, messages=data.messages, stream=True
             ):
                 if not chunk.choices:
                     continue

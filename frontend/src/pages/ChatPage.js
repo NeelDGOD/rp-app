@@ -24,6 +24,10 @@ STYLE  (tap Style button or type in { })
   {narrator} text    third-person transition
   {as mood}          shift tone for one reply
 
+DIRECTOR NOTE  (stays in effect until changed)
+  {direct: text}     override behavior until cleared
+  {normal}           clear the active director note
+
 CHAT
   bookmark name      save current state
   loadbookmark       restore a saved state
