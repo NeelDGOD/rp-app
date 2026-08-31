@@ -8,6 +8,7 @@ import {
   Sparkles, Brain, Search, X, Send
 } from "lucide-react";
 import { api } from "../lib/api";
+import { useSlowLoad } from "../lib/useSlowLoad";
 import BottomSheet from "../components/BottomSheet";
 import { useToast } from "../components/Toast";
 
@@ -127,6 +128,7 @@ export default function ChatPage() {
   const inputRef  = useRef(null);
   const fontSz    = parseInt(localStorage.getItem("font_size") || "17");
   const autoMem   = localStorage.getItem("auto_memory") !== "false";
+  const slowLoad  = useSlowLoad(!chat || !activeBranch);
 
   // ── LOAD ──
   const loadChat = useCallback(async () => {
@@ -357,8 +359,13 @@ export default function ChatPage() {
 
   if (!chat || !activeBranch) {
     return (
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100dvh", color: "var(--text3)" }}>
-        Loading…
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100dvh", color: "var(--text3)", gap: 8, textAlign: "center", padding: 24 }}>
+        <div>Loading…</div>
+        {slowLoad && (
+          <div style={{ fontSize: 13 }}>
+            ⚡ Waking up the server — this can take up to a minute on the free tier.
+          </div>
+        )}
       </div>
     );
   }

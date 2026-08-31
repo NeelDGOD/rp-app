@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { Plus, MoreHorizontal, Copy, Trash2, PenLine, X, Check } from "lucide-react";
 import { api } from "../lib/api";
+import { useSlowLoad } from "../lib/useSlowLoad";
 import BottomSheet from "../components/BottomSheet";
 import { useToast } from "../components/Toast";
 
@@ -15,6 +16,7 @@ export default function ChatsPage() {
   const [renameVal, setRenameVal] = useState("");
   const nav   = useNavigate();
   const toast = useToast();
+  const slowLoad = useSlowLoad(loading);
 
   const load = useCallback(async () => {
     try {
@@ -61,7 +63,16 @@ export default function ChatsPage() {
         </button>
       </div>
 
-      {loading && <div style={{ padding: 32, textAlign: "center", color: "var(--text3)" }}>Loading…</div>}
+      {loading && (
+        <div style={{ padding: 32, textAlign: "center", color: "var(--text3)" }}>
+          Loading…
+          {slowLoad && (
+            <div style={{ marginTop: 8, fontSize: 13 }}>
+              ⚡ Waking up the server — this can take up to a minute on the free tier.
+            </div>
+          )}
+        </div>
+      )}
 
       {!loading && chats.length === 0 && (
         <div style={{ padding: 48, textAlign: "center", color: "var(--text3)" }}>
