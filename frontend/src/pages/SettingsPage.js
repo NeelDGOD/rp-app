@@ -5,6 +5,7 @@ import { api } from "../lib/api";
 
 export default function SettingsPage() {
   const nav = useNavigate();
+  const [provider, setProvider] = useState("huggingface");
   const [token, setToken]       = useState("");
   const [showToken, setShowToken] = useState(false);
   const [model, setModel]       = useState("deepseek-ai/DeepSeek-V3");
@@ -15,6 +16,8 @@ export default function SettingsPage() {
   const [newModelStr, setNewModelStr] = useState("");
   const [newModelName, setNewModelName] = useState("");
 
+  const tokenKey = p => (p === "openrouter" ? "openrouter_token" : "hf_token");
+
   // Test chat
   const [testMessages, setTestMessages] = useState([]);
   const [testInput, setTestInput]       = useState("");
@@ -23,7 +26,9 @@ export default function SettingsPage() {
   const testBottomRef = useRef(null);
 
   useEffect(() => {
-    setToken(localStorage.getItem("hf_token") || "");
+    const p = localStorage.getItem("llm_provider") || "huggingface";
+    setProvider(p);
+    setToken(localStorage.getItem(tokenKey(p)) || "");
     setModel(localStorage.getItem("hf_model") || "deepseek-ai/DeepSeek-V3");
     setAutoMem(localStorage.getItem("auto_memory") !== "false");
     setUseRag(localStorage.getItem("use_rag") === "true");
@@ -40,9 +45,15 @@ export default function SettingsPage() {
 
   function save(key, val) { localStorage.setItem(key, String(val)); }
 
+  function selectProvider(p) {
+    setProvider(p);
+    save("llm_provider", p);
+    setToken(localStorage.getItem(tokenKey(p)) || "");
+  }
+
   function addSavedModel() {
     if (!newModelStr.trim()) return;
-    const entry = { name: newModelName.trim() || newModelStr.trim(), model: newModelStr.trim() };
+    const entry = { name: newModelName.trim() || newModelStr.trim(), model: newModelStr.trim(), provider };
     const updated = [...savedModels, entry];
     setSavedModels(updated);
     localStorage.setItem("saved_models", JSON.stringify(updated));
@@ -56,7 +67,8 @@ export default function SettingsPage() {
   }
 
   function selectSavedModel(m) {
-    setModel(m); save("hf_model", m);
+    setModel(m.model); save("hf_model", m.model);
+    if (m.provider && m.provider !== provider) selectProvider(m.provider);
   }
 
   async function sendTestMessage() {
@@ -96,18 +108,47 @@ export default function SettingsPage() {
         <span className="page-title">Settings</span>
       </div>
 
-      {/* ── HF TOKEN ── */}
+      {/* ── PROVIDER ── */}
       <div style={{ padding: "16px 16px 0" }}>
         <div style={{ fontSize: 12, fontFamily: "var(--mono)", color: "var(--text3)", marginBottom: 8, letterSpacing: "0.5px", textTransform: "uppercase" }}>
-          Hugging Face Token
+          Provider
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          {[
+            { id: "huggingface", label: "Hugging Face" },
+            { id: "openrouter", label: "OpenRouter" },
+          ].map(p => (
+            <button
+              key={p.id}
+              className="btn btn-sm"
+              onClick={() => selectProvider(p.id)}
+              style={{
+                flex: 1,
+                background: provider === p.id ? "var(--accent-bg2)" : "var(--bg3)",
+                border: `1px solid ${provider === p.id ? "var(--accent)" : "var(--border)"}`,
+                color: provider === p.id ? "var(--accent)" : "var(--text2)",
+              }}
+            >
+              {p.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ height: 1, background: "var(--border)", margin: "20px 0" }} />
+
+      {/* ── TOKEN ── */}
+      <div style={{ padding: "16px 16px 0" }}>
+        <div style={{ fontSize: 12, fontFamily: "var(--mono)", color: "var(--text3)", marginBottom: 8, letterSpacing: "0.5px", textTransform: "uppercase" }}>
+          {provider === "openrouter" ? "OpenRouter API Key" : "Hugging Face Token"}
         </div>
         <div style={{ position: "relative" }}>
           <input
             className="input"
             type={showToken ? "text" : "password"}
-            placeholder="hf_…"
+            placeholder={provider === "openrouter" ? "sk-or-…" : "hf_…"}
             value={token}
-            onChange={e => { setToken(e.target.value); save("hf_token", e.target.value); }}
+            onChange={e => { setToken(e.target.value); save(tokenKey(provider), e.target.value); }}
             style={{ paddingRight: 44, fontFamily: "var(--mono)", fontSize: 14 }}
           />
           <button className="btn-icon" onClick={() => setShowToken(v => !v)} style={{
@@ -130,13 +171,17 @@ export default function SettingsPage() {
         </div>
         <input
           className="input"
-          placeholder="deepseek-ai/DeepSeek-V3"
+          placeholder={provider === "openrouter" ? "openai/gpt-4o" : "deepseek-ai/DeepSeek-V3"}
           value={model}
           onChange={e => { setModel(e.target.value); save("hf_model", e.target.value); }}
           style={{ fontFamily: "var(--mono)", fontSize: 14 }}
         />
         <div style={{ fontSize: 12, color: "var(--text3)", marginTop: 6 }}>
-          Full model string e.g. <span style={{ color: "var(--text2)", fontFamily: "var(--mono)" }}>deepseek-ai/DeepSeek-V4-Pro:novita</span>
+          {provider === "openrouter" ? (
+            <>Full model slug e.g. <span style={{ color: "var(--text2)", fontFamily: "var(--mono)" }}>anthropic/claude-sonnet-5</span></>
+          ) : (
+            <>Full model string e.g. <span style={{ color: "var(--text2)", fontFamily: "var(--mono)" }}>deepseek-ai/DeepSeek-V4-Pro:novita</span></>
+          )}
         </div>
       </div>
 
@@ -202,17 +247,22 @@ export default function SettingsPage() {
           {savedModels.length === 0 && (
             <div style={{ fontSize: 13, color: "var(--text3)" }}>No saved models yet.</div>
           )}
-          {savedModels.map((m, i) => (
+          {savedModels.map((m, i) => {
+            const active = model === m.model && (m.provider || "huggingface") === provider;
+            return (
             <div key={i} style={{
               display: "flex", alignItems: "center", gap: 10,
               padding: "10px 12px", borderRadius: "var(--radius-sm)",
-              background: model === m.model ? "var(--accent-bg2)" : "var(--bg3)",
-              border: `1px solid ${model === m.model ? "var(--accent)" : "var(--border)"}`,
+              background: active ? "var(--accent-bg2)" : "var(--bg3)",
+              border: `1px solid ${active ? "var(--accent)" : "var(--border)"}`,
               cursor: "pointer",
-            }} onClick={() => selectSavedModel(m.model)}>
+            }} onClick={() => selectSavedModel(m)}>
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 15, color: model === m.model ? "var(--accent)" : "var(--text)" }}>
+                <div style={{ fontSize: 15, color: active ? "var(--accent)" : "var(--text)" }}>
                   {m.name}
+                  <span style={{ fontSize: 10, color: "var(--text3)", marginLeft: 8, fontFamily: "var(--mono)", textTransform: "uppercase" }}>
+                    {(m.provider || "huggingface") === "openrouter" ? "OpenRouter" : "HF"}
+                  </span>
                 </div>
                 <div style={{ fontSize: 11, fontFamily: "var(--mono)", color: "var(--text3)", marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                   {m.model}
@@ -223,16 +273,20 @@ export default function SettingsPage() {
                 ✕
               </button>
             </div>
-          ))}
+            );
+          })}
         </div>
 
         {/* Add new model */}
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <div style={{ fontSize: 11, color: "var(--text3)" }}>
+            Saves for the currently selected provider ({provider === "openrouter" ? "OpenRouter" : "Hugging Face"}).
+          </div>
           <input className="input" placeholder="Nickname (optional) — e.g. V4 Pro"
             value={newModelName} onChange={e => setNewModelName(e.target.value)}
             style={{ fontSize: 15 }} />
           <div style={{ display: "flex", gap: 8 }}>
-            <input className="input" placeholder="deepseek-ai/DeepSeek-V4-Pro:novita"
+            <input className="input" placeholder={provider === "openrouter" ? "openai/gpt-4o" : "deepseek-ai/DeepSeek-V4-Pro:novita"}
               value={newModelStr} onChange={e => setNewModelStr(e.target.value)}
               onKeyDown={e => e.key === "Enter" && addSavedModel()}
               style={{ flex: 1, fontFamily: "var(--mono)", fontSize: 13 }} />

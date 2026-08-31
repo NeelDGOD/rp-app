@@ -6,12 +6,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from huggingface_hub import InferenceClient
+from openai import OpenAI
 import bcrypt
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 TURSO_URL   = os.environ.get("TURSO_URL", "file:rp.db")
 TURSO_TOKEN = os.environ.get("TURSO_TOKEN", "")
 DEFAULT_MODEL = "deepseek-ai/DeepSeek-V3"
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 MAX_CONTEXT   = 20
 MEM_INTERVAL  = 6
 EMBED_MODEL   = "sentence-transformers/all-MiniLM-L6-v2"
@@ -284,17 +286,21 @@ def build_send_history(history: list, memory: str, resume: Optional[dict] = None
         send.insert(i, resume)
     return send
 
-def hf_client(token: str, model: str):
-    """Split a "repo_id:provider" model string (as copied from HF's model page)
-    into a client configured for that provider and the bare repo_id."""
+def get_client(provider: str, token: str, model: str):
+    """Return (chat client, model id) for the requested provider.
+    "huggingface" expects a "repo_id:provider" model string (as copied from
+    HF's model page); "openrouter" takes the model slug as-is via OpenRouter's
+    OpenAI-compatible API."""
+    if provider == "openrouter":
+        return OpenAI(api_key=token, base_url=OPENROUTER_BASE_URL), model
     if ":" in model:
-        repo_id, provider = model.split(":", 1)
+        repo_id, hf_provider = model.split(":", 1)
     else:
-        repo_id, provider = model, "auto"
-    return InferenceClient(provider=provider, api_key=token), repo_id
+        repo_id, hf_provider = model, "auto"
+    return InferenceClient(provider=hf_provider, api_key=token), repo_id
 
-def do_memory_update(history: list, current_memory: str, token: str, model: str, director_note: str = "") -> tuple:
-    client, model = hf_client(token, model)
+def do_memory_update(history: list, current_memory: str, provider: str, token: str, model: str, director_note: str = "") -> tuple:
+    client, model = get_client(provider, token, model)
     text = "\n".join(
         f"{'User' if m['role']=='user' else 'Bot'}: {m['content']}"
         for m in history[-20:] if m["role"] in ("user", "assistant")
@@ -508,6 +514,7 @@ def clone_chat(chat_id: str, data: Rename, user_id: str = Depends(require_user))
 @app.post("/chats/{chat_id}/send")
 async def send_message(chat_id: str, data: SendMsg,
                        x_hf_token: str = Header(...), x_model: str = Header(default=DEFAULT_MODEL),
+                       x_provider: str = Header(default="huggingface"),
                        x_use_rag: str = Header(default="false"),
                        user_id: str = Depends(require_user)):
     conn = get_db()
@@ -558,7 +565,7 @@ async def send_message(chat_id: str, data: SendMsg,
     send_hist.append({"role": "user", "content": cleaned})
     b["history"].append({"role": "user", "content": cleaned})
 
-    client, model = hf_client(x_hf_token, x_model)
+    client, model = get_client(x_provider, x_hf_token, x_model)
 
     async def stream():
         full = ""
@@ -585,6 +592,7 @@ async def send_message(chat_id: str, data: SendMsg,
 @app.post("/chats/{chat_id}/retry")
 async def retry_message(chat_id: str, data: RetryMsg,
                         x_hf_token: str = Header(...), x_model: str = Header(default=DEFAULT_MODEL),
+                        x_provider: str = Header(default="huggingface"),
                         user_id: str = Depends(require_user)):
     chat_owned(chat_id, user_id)
     parent = get_branch_data(data.branch_id)
@@ -596,7 +604,7 @@ async def retry_message(chat_id: str, data: RetryMsg,
         send_hist.append({"role": "system", "content": f"RETRY DIRECTION: {data.hint}"})
 
     new_bid = str(uuid.uuid4()); n = ts()
-    client, model = hf_client(x_hf_token, x_model)
+    client, model = get_client(x_provider, x_hf_token, x_model)
 
     async def stream():
         full = ""
@@ -638,11 +646,12 @@ def undo(branch_id: str, user_id: str = Depends(require_user)):
 # ── MEMORY ────────────────────────────────────────────────────────────────────
 @app.post("/branches/{branch_id}/memory")
 def update_memory(branch_id: str, x_hf_token: str = Header(...), x_model: str = Header(default=DEFAULT_MODEL),
+                  x_provider: str = Header(default="huggingface"),
                   x_use_rag: str = Header(default="false"), user_id: str = Depends(require_user)):
     branch_owned(branch_id, user_id)
     b = get_branch_data(branch_id)
     try:
-        new_mem, new_note = do_memory_update(b["history"], b["memory"], x_hf_token, x_model, b["director_note"])
+        new_mem, new_note = do_memory_update(b["history"], b["memory"], x_provider, x_hf_token, x_model, b["director_note"])
         save_branch(branch_id, b["history"], new_mem, b["turn_counter"], new_note)
         if x_use_rag.lower() == "true":
             store_memory_chunk(branch_id, new_mem)
@@ -715,6 +724,7 @@ class EditUserMsg(BaseModel):
 @app.post("/chats/{chat_id}/edit-user")
 async def edit_user_message(chat_id: str, data: EditUserMsg,
                             x_hf_token: str = Header(...), x_model: str = Header(default=DEFAULT_MODEL),
+                            x_provider: str = Header(default="huggingface"),
                             user_id: str = Depends(require_user)):
     chat_owned(chat_id, user_id)
     parent = get_branch_data(data.branch_id)
@@ -733,7 +743,7 @@ async def edit_user_message(chat_id: str, data: EditUserMsg,
         send_hist.append({"role": "system", "content": f"ONGOING DIRECTOR NOTE (stays in effect until the user changes or clears it): {parent['director_note']}"})
 
     new_bid = str(uuid.uuid4()); n = ts()
-    client, model = hf_client(x_hf_token, x_model)
+    client, model = get_client(x_provider, x_hf_token, x_model)
 
     async def stream():
         full = ""
@@ -767,8 +777,9 @@ class TestMsg(BaseModel):
 async def test_chat(data: TestMsg,
                     x_hf_token: str = Header(...),
                     x_model: str = Header(default=DEFAULT_MODEL),
+                    x_provider: str = Header(default="huggingface"),
                     user_id: str = Depends(require_user)):
-    client, model = hf_client(x_hf_token, x_model)
+    client, model = get_client(x_provider, x_hf_token, x_model)
 
     async def stream():
         try:
