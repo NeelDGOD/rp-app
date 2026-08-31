@@ -144,6 +144,11 @@ export default function SettingsPage() {
         </div>
         <div style={{ position: "relative" }}>
           <input
+            key={tokenKey(provider)}
+            name={tokenKey(provider)}
+            autoComplete="new-password"
+            data-lpignore="true"
+            data-1p-ignore="true"
             className="input"
             type={showToken ? "text" : "password"}
             placeholder={provider === "openrouter" ? "sk-or-…" : "hf_…"}
