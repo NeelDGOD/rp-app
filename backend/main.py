@@ -292,12 +292,12 @@ def get_client(provider: str, token: str, model: str):
     HF's model page); "openrouter" takes the model slug as-is via OpenRouter's
     OpenAI-compatible API."""
     if provider == "openrouter":
-        return OpenAI(api_key=token, base_url=OPENROUTER_BASE_URL), model
+        return OpenAI(api_key=token, base_url=OPENROUTER_BASE_URL, timeout=60.0), model
     if ":" in model:
         repo_id, hf_provider = model.split(":", 1)
     else:
         repo_id, hf_provider = model, "auto"
-    return InferenceClient(provider=hf_provider, api_key=token), repo_id
+    return InferenceClient(provider=hf_provider, api_key=token, timeout=60.0), repo_id
 
 def do_memory_update(history: list, current_memory: str, provider: str, token: str, model: str, director_note: str = "") -> tuple:
     client, model = get_client(provider, token, model)
