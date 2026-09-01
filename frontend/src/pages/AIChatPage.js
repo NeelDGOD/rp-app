@@ -96,6 +96,16 @@ export default function AIChatPage() {
     setImages(prev => prev.filter((_, i) => i !== idx));
   }
 
+  function handlePaste(e) {
+    const files = Array.from(e.clipboardData?.items || [])
+      .filter(it => it.type.startsWith("image/"))
+      .map(it => it.getAsFile())
+      .filter(Boolean);
+    if (!files.length) return;
+    e.preventDefault();
+    handleFiles(files);
+  }
+
   async function sendMessage() {
     if ((!input.trim() && images.length === 0) || streaming || !chat) return;
     const text = input.trim();
@@ -235,7 +245,8 @@ export default function AIChatPage() {
           value={input}
           onChange={e => setInput(e.target.value)}
           onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); } }}
-          placeholder="Message the assistant…"
+          onPaste={handlePaste}
+          placeholder="Message the assistant… (paste an image with Ctrl+V)"
           rows={1}
           style={{ flex: 1, resize: "none", fontSize: fontSz, maxHeight: 120, overflowY: "auto" }}
         />
