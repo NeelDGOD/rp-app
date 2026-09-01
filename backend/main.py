@@ -1,4 +1,4 @@
-import os, re, json, uuid, secrets
+import os, re, json, uuid, secrets, asyncio, threading
 from datetime import datetime
 from typing import Optional
 from fastapi import FastAPI, HTTPException, Header, Depends
@@ -292,12 +292,44 @@ def get_client(provider: str, token: str, model: str):
     HF's model page); "openrouter" takes the model slug as-is via OpenRouter's
     OpenAI-compatible API."""
     if provider == "openrouter":
-        return OpenAI(api_key=token, base_url=OPENROUTER_BASE_URL, timeout=60.0), model
+        return OpenAI(api_key=token, base_url=OPENROUTER_BASE_URL), model
     if ":" in model:
         repo_id, hf_provider = model.split(":", 1)
     else:
         repo_id, hf_provider = model, "auto"
-    return InferenceClient(provider=hf_provider, api_key=token, timeout=60.0), repo_id
+    return InferenceClient(provider=hf_provider, api_key=token), repo_id
+
+# Provider SDKs iterate the stream synchronously (blocking network I/O per chunk).
+# Running that directly inside an `async def` route blocks the whole event loop,
+# freezing every other request until the provider responds. Running the iteration
+# on a worker thread and relaying chunks through a queue keeps a slow/stuck
+# provider from stalling anything but its own request.
+def stream_chat(client, model: str, messages: list):
+    queue: asyncio.Queue = asyncio.Queue()
+    loop = asyncio.get_event_loop()
+    done = object()
+
+    def worker():
+        try:
+            for chunk in client.chat.completions.create(model=model, messages=messages, stream=True):
+                loop.call_soon_threadsafe(queue.put_nowait, chunk)
+        except Exception as e:
+            loop.call_soon_threadsafe(queue.put_nowait, e)
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, done)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    async def gen():
+        while True:
+            item = await queue.get()
+            if item is done:
+                return
+            if isinstance(item, Exception):
+                raise item
+            yield item
+
+    return gen()
 
 def do_memory_update(history: list, current_memory: str, provider: str, token: str, model: str, director_note: str = "") -> tuple:
     client, model = get_client(provider, token, model)
@@ -570,7 +602,7 @@ async def send_message(chat_id: str, data: SendMsg,
     async def stream():
         full = ""
         try:
-            for chunk in client.chat.completions.create(model=model, messages=send_hist, stream=True):
+            async for chunk in stream_chat(client, model, send_hist):
                 if not chunk.choices:
                     continue
                 delta = chunk.choices[0].delta.content
@@ -609,7 +641,7 @@ async def retry_message(chat_id: str, data: RetryMsg,
     async def stream():
         full = ""
         try:
-            for chunk in client.chat.completions.create(model=model, messages=send_hist, stream=True):
+            async for chunk in stream_chat(client, model, send_hist):
                 if not chunk.choices:
                     continue
                 delta = chunk.choices[0].delta.content
@@ -748,7 +780,7 @@ async def edit_user_message(chat_id: str, data: EditUserMsg,
     async def stream():
         full = ""
         try:
-            for chunk in client.chat.completions.create(model=model, messages=send_hist, stream=True):
+            async for chunk in stream_chat(client, model, send_hist):
                 if not chunk.choices:
                     continue
                 delta = chunk.choices[0].delta.content
@@ -783,9 +815,7 @@ async def test_chat(data: TestMsg,
 
     async def stream():
         try:
-            for chunk in client.chat.completions.create(
-                model=model, messages=data.messages, stream=True
-            ):
+            async for chunk in stream_chat(client, model, data.messages):
                 if not chunk.choices:
                     continue
                 delta = chunk.choices[0].delta.content

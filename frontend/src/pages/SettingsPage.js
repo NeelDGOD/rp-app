@@ -17,6 +17,8 @@ export default function SettingsPage() {
   const [newModelName, setNewModelName] = useState("");
 
   const tokenKey = p => (p === "openrouter" ? "openrouter_token" : "hf_token");
+  const modelKey = p => (p === "openrouter" ? "openrouter_model" : "hf_model");
+  const defaultModel = p => (p === "openrouter" ? "" : "deepseek-ai/DeepSeek-V3");
 
   // Test chat
   const [testMessages, setTestMessages] = useState([]);
@@ -29,7 +31,7 @@ export default function SettingsPage() {
     const p = localStorage.getItem("llm_provider") || "huggingface";
     setProvider(p);
     setToken(localStorage.getItem(tokenKey(p)) || "");
-    setModel(localStorage.getItem("hf_model") || "deepseek-ai/DeepSeek-V3");
+    setModel(localStorage.getItem(modelKey(p)) || defaultModel(p));
     setAutoMem(localStorage.getItem("auto_memory") !== "false");
     setUseRag(localStorage.getItem("use_rag") === "true");
     setFontSize(parseInt(localStorage.getItem("font_size") || "17"));
@@ -49,6 +51,7 @@ export default function SettingsPage() {
     setProvider(p);
     save("llm_provider", p);
     setToken(localStorage.getItem(tokenKey(p)) || "");
+    setModel(localStorage.getItem(modelKey(p)) || defaultModel(p));
   }
 
   function addSavedModel() {
@@ -67,8 +70,10 @@ export default function SettingsPage() {
   }
 
   function selectSavedModel(m) {
-    setModel(m.model); save("hf_model", m.model);
-    if (m.provider && m.provider !== provider) selectProvider(m.provider);
+    const p = m.provider || provider;
+    if (p !== provider) selectProvider(p);
+    setModel(m.model);
+    save(modelKey(p), m.model);
   }
 
   async function sendTestMessage() {
@@ -178,7 +183,7 @@ export default function SettingsPage() {
           className="input"
           placeholder={provider === "openrouter" ? "openai/gpt-4o" : "deepseek-ai/DeepSeek-V3"}
           value={model}
-          onChange={e => { setModel(e.target.value); save("hf_model", e.target.value); }}
+          onChange={e => { setModel(e.target.value); save(modelKey(provider), e.target.value); }}
           style={{ fontFamily: "var(--mono)", fontSize: 14 }}
         />
         <div style={{ fontSize: 12, color: "var(--text3)", marginTop: 6 }}>

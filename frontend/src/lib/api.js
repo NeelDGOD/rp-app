@@ -5,7 +5,9 @@ function getHeaders() {
   const token = localStorage.getItem(
     provider === "openrouter" ? "openrouter_token" : "hf_token"
   ) || "";
-  const model = localStorage.getItem("hf_model") || "deepseek-ai/DeepSeek-V3";
+  const model = localStorage.getItem(
+    provider === "openrouter" ? "openrouter_model" : "hf_model"
+  ) || (provider === "openrouter" ? "" : "deepseek-ai/DeepSeek-V3");
   const useRag = localStorage.getItem("use_rag") === "true";
   const authToken = localStorage.getItem("auth_token") || "";
   return {
