@@ -1,9 +1,10 @@
 import React from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { MessageSquare, Bot, Settings } from "lucide-react";
+import { MessageSquare, Bot, Settings, Sparkles } from "lucide-react";
 
 const tabs = [
   { path: "/chats",    label: "Chats",    Icon: MessageSquare },
+  { path: "/ai-chats", label: "AI Chat",  Icon: Sparkles },
   { path: "/bots",     label: "Bots",     Icon: Bot },
   { path: "/settings", label: "Settings", Icon: Settings },
 ];
@@ -11,8 +12,8 @@ const tabs = [
 export default function BottomNav() {
   const loc = useLocation();
   const nav = useNavigate();
-  // Hide on individual chat page and login screen
-  if (loc.pathname.match(/^\/chats\/.+/) || loc.pathname === "/login") return null;
+  // Hide on individual chat/ai-chat pages and login screen
+  if (loc.pathname.match(/^\/(chats|ai-chats)\/.+/) || loc.pathname === "/login") return null;
 
   return (
     <nav style={{

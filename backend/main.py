@@ -68,6 +68,7 @@ TABLE_COLS = {
     "bookmarks": ["id", "chat_id", "branch_id", "label", "history", "memory",
                   "turn_counter", "created_at"],
     "memory_chunks": ["id", "branch_id", "content", "embedding", "created_at"],
+    "ai_chats": ["id", "name", "history", "created_at", "updated_at", "user_id"],
 }
 
 def rows(conn, sql, params=(), cols=None):
@@ -115,6 +116,12 @@ def init_db():
             id TEXT PRIMARY KEY, branch_id TEXT NOT NULL,
             content TEXT NOT NULL, embedding TEXT NOT NULL,
             created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS ai_chats (
+            id TEXT PRIMARY KEY, name TEXT NOT NULL,
+            history TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+            user_id TEXT NOT NULL
         );
     """)
     conn.commit()
@@ -242,6 +249,13 @@ class BookmarkCreate(BaseModel):
 class RestoreHistory(BaseModel):
     history: list; memory: str = ""; turn_counter: int = 0
 
+class AIChatCreate(BaseModel):
+    name: str = "New Chat"
+
+class AIChatSendMsg(BaseModel):
+    content: str
+    images: list = []  # data URLs (base64), optional
+
 # ── SYSTEM PROMPT ─────────────────────────────────────────────────────────────
 CMD_RULES = """
 COMMAND OVERRIDE RULE:
@@ -260,6 +274,18 @@ Only output immersive roleplay text.
 
 def sys_msg(bot_content: str) -> dict:
     return {"role": "system", "content": f"{bot_content}\n\n{CMD_RULES}"}
+
+AI_CHAT_SYSTEM_PROMPT = "You are a helpful, knowledgeable assistant. Answer directly and naturally, with no persona or roleplay."
+
+def ai_msg_content(text: str, images: list):
+    if not images:
+        return text
+    parts = []
+    if text:
+        parts.append({"type": "text", "text": text})
+    for img in images:
+        parts.append({"type": "image_url", "image_url": {"url": img}})
+    return parts
 
 # ── MEMORY ────────────────────────────────────────────────────────────────────
 def mem_field(memory: str, field: str) -> str:
@@ -459,6 +485,15 @@ def bookmark_owned(bookmark_id: str, user_id: str) -> dict:
     if not bm: raise HTTPException(404, "Bookmark not found")
     chat_owned(bm["chat_id"], user_id)
     return bm
+
+def ai_chat_owned(chat_id: str, user_id: str, conn=None) -> dict:
+    close = conn is None
+    if close: conn = get_db()
+    c = row(conn, "SELECT * FROM ai_chats WHERE id=?", (chat_id,), cols=TABLE_COLS["ai_chats"])
+    if close: conn.close()
+    if not c or c["user_id"] != user_id:
+        raise HTTPException(404, "Chat not found")
+    return c
 
 # ── BOTS ──────────────────────────────────────────────────────────────────────
 @app.get("/bots")
@@ -821,6 +856,77 @@ async def test_chat(data: TestMsg,
                 delta = chunk.choices[0].delta.content
                 if delta:
                     yield f"data: {json.dumps({'type':'delta','content':delta})}\n\n"
+            yield f"data: {json.dumps({'type':'done'})}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'type':'error','message':str(e)})}\n\n"
+
+    return StreamingResponse(stream(), media_type="text/event-stream")
+
+# ── AI CHAT (plain assistant, no bot/persona) ─────────────────────────────────
+@app.get("/ai-chats")
+def list_ai_chats(user_id: str = Depends(require_user)):
+    conn = get_db()
+    r = rows(conn, "SELECT id,name,created_at,updated_at FROM ai_chats WHERE user_id=? ORDER BY updated_at DESC",
+             (user_id,), cols=["id", "name", "created_at", "updated_at"])
+    conn.close()
+    return r
+
+@app.post("/ai-chats")
+def create_ai_chat(data: AIChatCreate, user_id: str = Depends(require_user)):
+    conn = get_db(); cid = str(uuid.uuid4()); n = ts()
+    q(conn, "INSERT INTO ai_chats VALUES (?,?,?,?,?,?)", (cid, data.name, "[]", n, n, user_id))
+    conn.commit(); conn.close()
+    return {"id": cid, "name": data.name, "created_at": n, "updated_at": n}
+
+@app.get("/ai-chats/{chat_id}")
+def get_ai_chat(chat_id: str, user_id: str = Depends(require_user)):
+    c = ai_chat_owned(chat_id, user_id)
+    c["history"] = json.loads(c["history"])
+    return c
+
+@app.put("/ai-chats/{chat_id}/rename")
+def rename_ai_chat(chat_id: str, data: Rename, user_id: str = Depends(require_user)):
+    conn = get_db(); ai_chat_owned(chat_id, user_id, conn)
+    q(conn, "UPDATE ai_chats SET name=?,updated_at=? WHERE id=?", (data.name, ts(), chat_id))
+    conn.commit(); conn.close()
+    return {"ok": True}
+
+@app.delete("/ai-chats/{chat_id}")
+def delete_ai_chat(chat_id: str, user_id: str = Depends(require_user)):
+    conn = get_db(); ai_chat_owned(chat_id, user_id, conn)
+    q(conn, "DELETE FROM ai_chats WHERE id=?", (chat_id,))
+    conn.commit(); conn.close()
+    return {"ok": True}
+
+@app.post("/ai-chats/{chat_id}/send")
+async def send_ai_message(chat_id: str, data: AIChatSendMsg,
+                          x_hf_token: str = Header(...), x_model: str = Header(default=DEFAULT_MODEL),
+                          x_provider: str = Header(default="huggingface"),
+                          user_id: str = Depends(require_user)):
+    c = ai_chat_owned(chat_id, user_id)
+    history = json.loads(c["history"])
+    if not history:
+        history.append({"role": "system", "content": AI_CHAT_SYSTEM_PROMPT})
+
+    history.append({"role": "user", "content": ai_msg_content(data.content, data.images)})
+    send_hist = build_send_history(history, "")
+
+    client, model = get_client(x_provider, x_hf_token, x_model)
+
+    async def stream():
+        full = ""
+        try:
+            async for chunk in stream_chat(client, model, send_hist):
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta.content
+                if delta:
+                    full += delta
+                    yield f"data: {json.dumps({'type':'delta','content':delta})}\n\n"
+            history.append({"role": "assistant", "content": full})
+            conn = get_db()
+            q(conn, "UPDATE ai_chats SET history=?,updated_at=? WHERE id=?", (json.dumps(history), ts(), chat_id))
+            conn.commit(); conn.close()
             yield f"data: {json.dumps({'type':'done'})}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'type':'error','message':str(e)})}\n\n"

@@ -5,6 +5,8 @@ import ChatPage from "./pages/ChatPage";
 import BotsPage from "./pages/BotsPage";
 import SettingsPage from "./pages/SettingsPage";
 import LoginPage from "./pages/LoginPage";
+import AIChatsPage from "./pages/AIChatsPage";
+import AIChatPage from "./pages/AIChatPage";
 import BottomNav from "./components/BottomNav";
 import "./index.css";
 
@@ -22,6 +24,8 @@ export default function App() {
           <Route path="/" element={<Navigate to="/chats" replace />} />
           <Route path="/chats" element={<RequireAuth><ChatsPage /></RequireAuth>} />
           <Route path="/chats/:chatId" element={<RequireAuth><ChatPage /></RequireAuth>} />
+          <Route path="/ai-chats" element={<RequireAuth><AIChatsPage /></RequireAuth>} />
+          <Route path="/ai-chats/:chatId" element={<RequireAuth><AIChatPage /></RequireAuth>} />
           <Route path="/bots" element={<RequireAuth><BotsPage /></RequireAuth>} />
           <Route path="/settings" element={<RequireAuth><SettingsPage /></RequireAuth>} />
         </Routes>

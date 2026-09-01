@@ -121,6 +121,23 @@ export const api = {
       return readStream(res.body, onDelta, onDone, onError);
     }).catch(onError);
   },
+
+  // AI Chat (plain assistant, no bot/persona)
+  getAIChats: () => request("GET", "/ai-chats"),
+  createAIChat: (data) => request("POST", "/ai-chats", data),
+  getAIChat: (id) => request("GET", `/ai-chats/${id}`),
+  renameAIChat: (id, name) => request("PUT", `/ai-chats/${id}/rename`, { name }),
+  deleteAIChat: (id) => request("DELETE", `/ai-chats/${id}`),
+  sendAIChatStream: (chatId, body, onDelta, onDone, onError) => {
+    return fetch(`${BASE}/ai-chats/${chatId}/send`, {
+      method: "POST",
+      headers: getHeaders(),
+      body: JSON.stringify(body),
+    }).then((res) => {
+      if (!res.ok) throw new Error("Send failed");
+      return readStream(res.body, onDelta, onDone, onError);
+    }).catch(onError);
+  },
 };
 
 async function readStream(body, onDelta, onDone, onError) {
