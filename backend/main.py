@@ -398,17 +398,19 @@ EMOTIONAL STATE:{directive_block}"""},
     return raw, new_note
 
 # ── RAG (memory chunk embedding + retrieval) ─────────────────────────────────
-_embedder = None
-
-def get_embedder():
-    global _embedder
-    if _embedder is None:
-        from sentence_transformers import SentenceTransformer
-        _embedder = SentenceTransformer(EMBED_MODEL)
-    return _embedder
-
-def embed_text(text: str) -> list:
-    return get_embedder().encode(text).tolist()
+# Embeddings are computed remotely via HF's Inference API rather than loading
+# sentence-transformers/torch in-process — that combo's memory footprint was
+# what kept OOM-killing the server on free-tier hosts.
+def embed_text(text: str, token: str) -> list:
+    client = InferenceClient(api_key=token)
+    vec = client.feature_extraction(text, model=EMBED_MODEL)
+    arr = vec.tolist() if hasattr(vec, "tolist") else list(vec)
+    if arr and isinstance(arr[0], list):
+        # Some providers return per-token embeddings instead of one pooled
+        # sentence vector — mean-pool across tokens ourselves in that case.
+        n = len(arr)
+        arr = [sum(col) / n for col in zip(*arr)]
+    return arr
 
 def cosine_similarity(a: list, b: list) -> float:
     dot = sum(x * y for x, y in zip(a, b))
@@ -418,19 +420,19 @@ def cosine_similarity(a: list, b: list) -> float:
         return 0.0
     return dot / (norm_a * norm_b)
 
-def store_memory_chunk(branch_id: str, content: str):
+def store_memory_chunk(branch_id: str, content: str, token: str):
     conn = get_db()
     q(conn, "INSERT INTO memory_chunks VALUES (?,?,?,?,?)",
-      (str(uuid.uuid4()), branch_id, content, json.dumps(embed_text(content)), ts()))
+      (str(uuid.uuid4()), branch_id, content, json.dumps(embed_text(content, token)), ts()))
     conn.commit(); conn.close()
 
-def retrieve_relevant_chunks(branch_id: str, query: str, k: int = RAG_TOP_K) -> list:
+def retrieve_relevant_chunks(branch_id: str, query: str, token: str, k: int = RAG_TOP_K) -> list:
     conn = get_db()
     chunks = rows(conn, "SELECT content, embedding FROM memory_chunks WHERE branch_id=?", (branch_id,), cols=["content", "embedding"])
     conn.close()
     if not chunks:
         return []
-    query_vec = embed_text(query)
+    query_vec = embed_text(query, token)
     scored = [(cosine_similarity(query_vec, json.loads(c["embedding"])), c["content"]) for c in chunks]
     scored.sort(key=lambda x: x[0], reverse=True)
     return [content for _, content in scored[:k]]
@@ -583,6 +585,7 @@ async def send_message(chat_id: str, data: SendMsg,
                        x_hf_token: str = Header(...), x_model: str = Header(default=DEFAULT_MODEL),
                        x_provider: str = Header(default="huggingface"),
                        x_use_rag: str = Header(default="false"),
+                       x_embed_token: str = Header(default=""),
                        user_id: str = Depends(require_user)):
     conn = get_db()
     c = chat_owned(chat_id, user_id, conn)
@@ -616,8 +619,8 @@ async def send_message(chat_id: str, data: SendMsg,
     resume = resume_injection(b["memory"]) if data.is_first_turn else None
     send_hist = build_send_history(b["history"], b["memory"], resume)
 
-    if x_use_rag.lower() == "true":
-        relevant = retrieve_relevant_chunks(data.branch_id, cleaned)
+    if x_use_rag.lower() == "true" and x_embed_token:
+        relevant = retrieve_relevant_chunks(data.branch_id, cleaned, x_embed_token)
         if relevant:
             send_hist.append({"role": "system", "content": "RELEVANT PAST MEMORY:\n" + "\n---\n".join(relevant)})
 
@@ -714,14 +717,15 @@ def undo(branch_id: str, user_id: str = Depends(require_user)):
 @app.post("/branches/{branch_id}/memory")
 def update_memory(branch_id: str, x_hf_token: str = Header(...), x_model: str = Header(default=DEFAULT_MODEL),
                   x_provider: str = Header(default="huggingface"),
-                  x_use_rag: str = Header(default="false"), user_id: str = Depends(require_user)):
+                  x_use_rag: str = Header(default="false"), x_embed_token: str = Header(default=""),
+                  user_id: str = Depends(require_user)):
     branch_owned(branch_id, user_id)
     b = get_branch_data(branch_id)
     try:
         new_mem, new_note = do_memory_update(b["history"], b["memory"], x_provider, x_hf_token, x_model, b["director_note"])
         save_branch(branch_id, b["history"], new_mem, b["turn_counter"], new_note)
-        if x_use_rag.lower() == "true":
-            store_memory_chunk(branch_id, new_mem)
+        if x_use_rag.lower() == "true" and x_embed_token:
+            store_memory_chunk(branch_id, new_mem, x_embed_token)
         return {"ok": True, "memory": new_mem, "director_note": new_note}
     except Exception as e:
         raise HTTPException(500, str(e))

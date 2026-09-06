@@ -10,12 +10,17 @@ function getHeaders() {
   ) || (provider === "openrouter" ? "" : "deepseek-ai/DeepSeek-V3");
   const useRag = localStorage.getItem("use_rag") === "true";
   const authToken = localStorage.getItem("auth_token") || "";
+  // RAG embeddings always go through HF's Inference API regardless of which
+  // provider is selected for chat, so this is the raw HF token, not the
+  // provider-conditional one above.
+  const embedToken = localStorage.getItem("hf_token") || "";
   return {
     "Content-Type": "application/json",
     "x-hf-token": token,
     "x-model": model,
     "x-provider": provider,
     "x-use-rag": String(useRag),
+    "x-embed-token": embedToken,
     "x-auth-token": authToken,
   };
 }
