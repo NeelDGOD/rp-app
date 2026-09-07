@@ -16,7 +16,7 @@ DEFAULT_MODEL = "deepseek-ai/DeepSeek-V3"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 MAX_CONTEXT   = 20
 MEM_INTERVAL  = 6
-EMBED_MODEL   = "sentence-transformers/all-MiniLM-L6-v2"
+EMBED_MODEL   = "BAAI/bge-small-en-v1.5"
 RAG_TOP_K     = 3
 ADMIN_EMAIL   = "admin@chat.com"
 ADMIN_PASSWORD = "admin"
@@ -402,7 +402,7 @@ EMOTIONAL STATE:{directive_block}"""},
 # sentence-transformers/torch in-process — that combo's memory footprint was
 # what kept OOM-killing the server on free-tier hosts.
 def embed_text(text: str, token: str) -> list:
-    client = InferenceClient(api_key=token)
+    client = InferenceClient(provider="hf-inference", api_key=token)
     vec = client.feature_extraction(text, model=EMBED_MODEL)
     arr = vec.tolist() if hasattr(vec, "tolist") else list(vec)
     if arr and isinstance(arr[0], list):
