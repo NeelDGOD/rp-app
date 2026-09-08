@@ -645,9 +645,14 @@ async def send_message(chat_id: str, data: SendMsg,
     send_hist = build_send_history(b["history"], b["memory"], resume)
 
     if x_use_rag.lower() == "true" and x_embed_token:
-        relevant = retrieve_relevant_chunks(data.branch_id, cleaned, x_embed_token)
-        if relevant:
-            send_hist.append({"role": "system", "content": "RELEVANT PAST MEMORY:\n" + "\n---\n".join(relevant)})
+        # RAG context is a best-effort enhancement — a broken/unauthorized
+        # embed token must never block sending the actual chat message.
+        try:
+            relevant = retrieve_relevant_chunks(data.branch_id, cleaned, x_embed_token)
+            if relevant:
+                send_hist.append({"role": "system", "content": "RELEVANT PAST MEMORY:\n" + "\n---\n".join(relevant)})
+        except Exception:
+            pass
 
     if b["director_note"]:
         send_hist.append({"role": "system", "content": f"ONGOING DIRECTOR NOTE (stays in effect until the user changes or clears it): {b['director_note']}"})
@@ -752,7 +757,12 @@ def update_memory(branch_id: str, x_hf_token: str = Header(...), x_model: str = 
         new_mem, new_note = do_memory_update(b["history"], b["memory"], x_provider, x_hf_token, x_model, b["director_note"])
         save_branch(branch_id, b["history"], new_mem, b["turn_counter"], new_note)
         if x_use_rag.lower() == "true" and x_embed_token:
-            store_memory_chunk(branch_id, new_mem, x_embed_token)
+            # The memory document above is already saved — a broken/unauthorized
+            # embed token must not turn this into a reported failure.
+            try:
+                store_memory_chunk(branch_id, new_mem, x_embed_token)
+            except Exception:
+                pass
         return {"ok": True, "memory": new_mem, "director_note": new_note}
     except Exception as e:
         raise HTTPException(500, str(e))
