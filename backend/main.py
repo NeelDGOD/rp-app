@@ -1,4 +1,4 @@
-import os, re, json, uuid, secrets, asyncio, threading
+import os, re, json, uuid, secrets, asyncio, threading, time
 from datetime import datetime
 from typing import Optional
 from fastapi import FastAPI, HTTPException, Header, Depends
@@ -452,11 +452,32 @@ def get_branch_data(branch_id: str) -> dict:
         b["history"] = []
     return b
 
+def with_db_retry(fn):
+    """Run a block of database work, retrying on libsql's transient 'stream
+    already in use' conflict (concurrent requests racing on the same
+    underlying Hrana stream) instead of surfacing it to the user."""
+    for attempt in range(3):
+        try:
+            return fn()
+        except Exception as e:
+            if "Stream already in use" in str(e) and attempt < 2:
+                time.sleep(0.3 * (attempt + 1))
+                continue
+            raise
+
+def db_write(sql: str, params: tuple = ()):
+    def _do():
+        conn = get_db()
+        q(conn, sql, params)
+        conn.commit(); conn.close()
+    with_db_retry(_do)
+
+def touch_chat(chat_id: str):
+    db_write("UPDATE chats SET updated_at=? WHERE id=?", (ts(), chat_id))
+
 def save_branch(branch_id: str, history: list, memory: str, turns: int, director_note: str):
-    conn = get_db()
-    q(conn, "UPDATE branches SET history=?,memory=?,turn_counter=?,director_note=?,updated_at=? WHERE id=?",
-      (json.dumps(history), memory, turns, director_note, ts(), branch_id))
-    conn.commit(); conn.close()
+    db_write("UPDATE branches SET history=?,memory=?,turn_counter=?,director_note=?,updated_at=? WHERE id=?",
+             (json.dumps(history), memory, turns, director_note, ts(), branch_id))
 
 def get_bot(bot_id: str, conn=None, user_id: str = None) -> dict:
     close = conn is None
@@ -655,7 +676,7 @@ async def send_message(chat_id: str, data: SendMsg,
             b["turn_counter"] += 1
             needs_mem = b["turn_counter"] % MEM_INTERVAL == 0
             save_branch(data.branch_id, b["history"], b["memory"], b["turn_counter"], b["director_note"])
-            conn2 = get_db(); q(conn2, "UPDATE chats SET updated_at=? WHERE id=?", (ts(), chat_id)); conn2.commit(); conn2.close()
+            touch_chat(chat_id)
             yield f"data: {json.dumps({'type':'done','needs_memory':needs_mem,'turn_counter':b['turn_counter']})}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'type':'error','message':str(e)})}\n\n"
@@ -692,11 +713,13 @@ async def retry_message(chat_id: str, data: RetryMsg,
                     yield f"data: {json.dumps({'type':'delta','content':delta})}\n\n"
             new_hist = hist_base + [{"role": "assistant", "content": full}]
             needs_mem = parent["turn_counter"] % MEM_INTERVAL == 0
-            conn = get_db()
-            q(conn, "INSERT INTO branches VALUES (?,?,?,?,?,?,?,?,?,?)",
-              (new_bid, chat_id, data.branch_id, len(hist_base), json.dumps(new_hist), parent["memory"], parent["turn_counter"], n, n, parent["director_note"]))
-            q(conn, "UPDATE chats SET updated_at=? WHERE id=?", (ts(), chat_id))
-            conn.commit(); conn.close()
+            def _persist():
+                conn = get_db()
+                q(conn, "INSERT INTO branches VALUES (?,?,?,?,?,?,?,?,?,?)",
+                  (new_bid, chat_id, data.branch_id, len(hist_base), json.dumps(new_hist), parent["memory"], parent["turn_counter"], n, n, parent["director_note"]))
+                q(conn, "UPDATE chats SET updated_at=? WHERE id=?", (ts(), chat_id))
+                conn.commit(); conn.close()
+            with_db_retry(_persist)
             yield f"data: {json.dumps({'type':'done','branch_id':new_bid,'needs_memory':needs_mem})}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'type':'error','message':str(e)})}\n\n"
@@ -832,11 +855,13 @@ async def edit_user_message(chat_id: str, data: EditUserMsg,
                     yield f"data: {json.dumps({'type':'delta','content':delta})}\n\n"
             new_hist = hist_base + [{"role": "assistant", "content": full}]
             needs_mem = parent["turn_counter"] % MEM_INTERVAL == 0
-            conn = get_db()
-            q(conn, "INSERT INTO branches VALUES (?,?,?,?,?,?,?,?,?,?)",
-              (new_bid, chat_id, data.branch_id, actual_idx, json.dumps(new_hist), parent["memory"], parent["turn_counter"], n, n, parent["director_note"]))
-            q(conn, "UPDATE chats SET updated_at=? WHERE id=?", (ts(), chat_id))
-            conn.commit(); conn.close()
+            def _persist():
+                conn = get_db()
+                q(conn, "INSERT INTO branches VALUES (?,?,?,?,?,?,?,?,?,?)",
+                  (new_bid, chat_id, data.branch_id, actual_idx, json.dumps(new_hist), parent["memory"], parent["turn_counter"], n, n, parent["director_note"]))
+                q(conn, "UPDATE chats SET updated_at=? WHERE id=?", (ts(), chat_id))
+                conn.commit(); conn.close()
+            with_db_retry(_persist)
             yield f"data: {json.dumps({'type':'done','branch_id':new_bid,'needs_memory':needs_mem})}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'type':'error','message':str(e)})}\n\n"
