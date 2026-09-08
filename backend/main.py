@@ -402,7 +402,11 @@ EMOTIONAL STATE:{directive_block}"""},
 # sentence-transformers/torch in-process — that combo's memory footprint was
 # what kept OOM-killing the server on free-tier hosts.
 def embed_text(text: str, token: str) -> list:
-    client = InferenceClient(provider="hf-inference", api_key=token)
+    # "auto" does a live lookup of which provider currently has this model
+    # deployed rather than pinning to one provider that might not have it
+    # warm right now — pinning to hf-inference specifically was the cause
+    # of the "model not supported" failures.
+    client = InferenceClient(provider="auto", api_key=token)
     vec = client.feature_extraction(text, model=EMBED_MODEL)
     arr = vec.tolist() if hasattr(vec, "tolist") else list(vec)
     if arr and isinstance(arr[0], list):
