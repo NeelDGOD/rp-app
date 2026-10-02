@@ -330,6 +330,12 @@ def get_client(provider: str, token: str, model: str):
 # freezing every other request until the provider responds. Running the iteration
 # on a worker thread and relaying chunks through a queue keeps a slow/stuck
 # provider from stalling anything but its own request.
+class _KeepAlive:
+    pass
+
+KEEPALIVE = _KeepAlive()
+KEEPALIVE_INTERVAL = 15  # seconds of silence tolerated before emitting a heartbeat
+
 def stream_chat(client, model: str, messages: list):
     queue: asyncio.Queue = asyncio.Queue()
     loop = asyncio.get_event_loop()
@@ -346,9 +352,17 @@ def stream_chat(client, model: str, messages: list):
 
     threading.Thread(target=worker, daemon=True).start()
 
+    # Render sits behind a proxy that drops connections that go quiet for too
+    # long. A slow-to-start provider (cold model, etc.) could otherwise leave
+    # the response with zero bytes sent for minutes, so a heartbeat is emitted
+    # on the queue timeout to keep the connection alive until real data shows up.
     async def gen():
         while True:
-            item = await queue.get()
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=KEEPALIVE_INTERVAL)
+            except asyncio.TimeoutError:
+                yield KEEPALIVE
+                continue
             if item is done:
                 return
             if isinstance(item, Exception):
@@ -671,6 +685,9 @@ async def send_message(chat_id: str, data: SendMsg,
         full = ""
         try:
             async for chunk in stream_chat(client, model, send_hist):
+                if chunk is KEEPALIVE:
+                    yield ": keepalive\n\n"
+                    continue
                 if not chunk.choices:
                     continue
                 delta = chunk.choices[0].delta.content
@@ -710,6 +727,9 @@ async def retry_message(chat_id: str, data: RetryMsg,
         full = ""
         try:
             async for chunk in stream_chat(client, model, send_hist):
+                if chunk is KEEPALIVE:
+                    yield ": keepalive\n\n"
+                    continue
                 if not chunk.choices:
                     continue
                 delta = chunk.choices[0].delta.content
@@ -857,6 +877,9 @@ async def edit_user_message(chat_id: str, data: EditUserMsg,
         full = ""
         try:
             async for chunk in stream_chat(client, model, send_hist):
+                if chunk is KEEPALIVE:
+                    yield ": keepalive\n\n"
+                    continue
                 if not chunk.choices:
                     continue
                 delta = chunk.choices[0].delta.content
@@ -894,6 +917,9 @@ async def test_chat(data: TestMsg,
     async def stream():
         try:
             async for chunk in stream_chat(client, model, data.messages):
+                if chunk is KEEPALIVE:
+                    yield ": keepalive\n\n"
+                    continue
                 if not chunk.choices:
                     continue
                 delta = chunk.choices[0].delta.content
@@ -960,6 +986,9 @@ async def send_ai_message(chat_id: str, data: AIChatSendMsg,
         full = ""
         try:
             async for chunk in stream_chat(client, model, send_hist):
+                if chunk is KEEPALIVE:
+                    yield ": keepalive\n\n"
+                    continue
                 if not chunk.choices:
                     continue
                 delta = chunk.choices[0].delta.content
