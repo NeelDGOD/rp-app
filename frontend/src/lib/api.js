@@ -25,8 +25,23 @@ function getHeaders() {
   };
 }
 
+// Render's free tier spins the backend down after inactivity; the first
+// request after that can get its connection killed outright while the
+// instance wakes back up. A short retry absorbs that window instead of
+// surfacing a hard failure for what's really just a cold start.
+async function fetchWithRetry(url, options, attempts = 2, delayMs = 4000) {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fetch(url, options);
+    } catch (err) {
+      if (i === attempts - 1) throw err;
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+}
+
 async function request(method, path, body) {
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await fetchWithRetry(`${BASE}${path}`, {
     method,
     headers: getHeaders(),
     body: body ? JSON.stringify(body) : undefined,
@@ -74,7 +89,7 @@ export const api = {
 
   // Test chat — bare model, no system prompt
   testChatStream: (messages, onDelta, onDone, onError) => {
-    return fetch(`${BASE}/test-chat`, {
+    return fetchWithRetry(`${BASE}/test-chat`, {
       method: "POST",
       headers: getHeaders(),
       body: JSON.stringify({ messages }),
@@ -90,7 +105,7 @@ export const api = {
 
   // Edit user message — streaming, creates new branch
   editUserStream: (chatId, body, onDelta, onDone, onError) => {
-    return fetch(`${BASE}/chats/${chatId}/edit-user`, {
+    return fetchWithRetry(`${BASE}/chats/${chatId}/edit-user`, {
       method: "POST",
       headers: getHeaders(),
       body: JSON.stringify(body),
@@ -105,7 +120,7 @@ export const api = {
 
   // Streaming send
   sendStream: (chatId, body, onDelta, onDone, onError) => {
-    return fetch(`${BASE}/chats/${chatId}/send`, {
+    return fetchWithRetry(`${BASE}/chats/${chatId}/send`, {
       method: "POST",
       headers: getHeaders(),
       body: JSON.stringify(body),
@@ -117,7 +132,7 @@ export const api = {
 
   // Streaming retry
   retryStream: (chatId, body, onDelta, onDone, onError) => {
-    return fetch(`${BASE}/chats/${chatId}/retry`, {
+    return fetchWithRetry(`${BASE}/chats/${chatId}/retry`, {
       method: "POST",
       headers: getHeaders(),
       body: JSON.stringify(body),
@@ -134,7 +149,7 @@ export const api = {
   renameAIChat: (id, name) => request("PUT", `/ai-chats/${id}/rename`, { name }),
   deleteAIChat: (id) => request("DELETE", `/ai-chats/${id}`),
   sendAIChatStream: (chatId, body, onDelta, onDone, onError) => {
-    return fetch(`${BASE}/ai-chats/${chatId}/send`, {
+    return fetchWithRetry(`${BASE}/ai-chats/${chatId}/send`, {
       method: "POST",
       headers: getHeaders(),
       body: JSON.stringify(body),
