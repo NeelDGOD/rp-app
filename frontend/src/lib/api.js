@@ -25,17 +25,20 @@ function getHeaders() {
   };
 }
 
-// Render's free tier spins the backend down after inactivity; the first
-// request after that can get its connection killed outright while the
-// instance wakes back up. A short retry absorbs that window instead of
-// surfacing a hard failure for what's really just a cold start.
-async function fetchWithRetry(url, options, attempts = 2, delayMs = 4000) {
-  for (let i = 0; i < attempts; i++) {
+// Render's free tier randomly drops a fraction of connections outright (confirmed
+// via direct curl testing against the host, unrelated to headers/CORS/browser —
+// it's the hosting infra itself), on top of the usual cold-start-after-idle delay.
+// Retries with growing delays absorb both: a quick retry catches a short-lived
+// drop, a longer one gives a cold instance more time to finish waking up.
+const RETRY_DELAYS_MS = [800, 2500];
+
+async function fetchWithRetry(url, options) {
+  for (let i = 0; ; i++) {
     try {
       return await fetch(url, options);
     } catch (err) {
-      if (i === attempts - 1) throw err;
-      await new Promise((r) => setTimeout(r, delayMs));
+      if (i >= RETRY_DELAYS_MS.length) throw err;
+      await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[i]));
     }
   }
 }
