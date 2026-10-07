@@ -2,42 +2,73 @@ const BASE = process.env.REACT_APP_API_URL || "http://localhost:8000";
 
 export const PROVIDERS = {
   huggingface: {
-    label: "Hugging Face", short: "HF",
+    label: "Hugging Face",
     tokenKey: "hf_token", modelKey: "hf_model", defaultModel: "deepseek-ai/DeepSeek-V3",
     tokenLabel: "Hugging Face Token", tokenPlaceholder: "hf_…",
     modelHint: "Full model string", modelExample: "deepseek-ai/DeepSeek-V4-Pro:novita",
   },
   openrouter: {
-    label: "OpenRouter", short: "OpenRouter",
+    label: "OpenRouter",
     tokenKey: "openrouter_token", modelKey: "openrouter_model", defaultModel: "",
     tokenLabel: "OpenRouter API Key", tokenPlaceholder: "sk-or-…",
     modelHint: "Full model slug", modelExample: "anthropic/claude-sonnet-5",
   },
   nvidia: {
-    label: "NVIDIA", short: "NVIDIA",
+    label: "NVIDIA",
     tokenKey: "nvidia_token", modelKey: "nvidia_model", defaultModel: "deepseek-ai/deepseek-v4.1-flash",
     tokenLabel: "NVIDIA API Key", tokenPlaceholder: "nvapi-…",
     modelHint: "Model id from build.nvidia.com", modelExample: "deepseek-ai/deepseek-v4.1-flash",
   },
   gemini: {
-    label: "Gemini", short: "Gemini",
+    label: "Gemini",
     tokenKey: "gemini_token", modelKey: "gemini_model", defaultModel: "gemini-3.8-flash",
     tokenLabel: "Google AI Studio API Key", tokenPlaceholder: "AIza…",
     modelHint: "Gemini model id", modelExample: "gemini-3.8-flash",
   },
   mistral: {
-    label: "Mistral", short: "Mistral",
+    label: "Mistral",
     tokenKey: "mistral_token", modelKey: "mistral_model", defaultModel: "mistral-large-latest",
     tokenLabel: "Mistral API Key", tokenPlaceholder: "Mistral API key",
     modelHint: "Mistral model id", modelExample: "mistral-large-latest",
   },
   groq: {
-    label: "Groq", short: "Groq",
+    label: "Groq",
     tokenKey: "groq_token", modelKey: "groq_model", defaultModel: "llama-3.3-70b-versatile",
     tokenLabel: "Groq API Key", tokenPlaceholder: "gsk_…",
     modelHint: "Groq model id", modelExample: "llama-3.3-70b-versatile",
   },
 };
+
+const SYNCED_NAMES = [
+  ...Object.values(PROVIDERS).flatMap(p => [p.tokenKey, p.modelKey]),
+  "llm_provider", "saved_models", "use_fallbacks",
+];
+
+export function clearSession() {
+  ["auth_token", "auth_email", ...SYNCED_NAMES].forEach(k => localStorage.removeItem(k));
+}
+
+function localSettings() {
+  return Object.fromEntries(SYNCED_NAMES.map(k => [k, localStorage.getItem(k) || ""]).filter(([, v]) => v));
+}
+
+// The server copy is authoritative so a cleared setting stays cleared on every
+// device; the one exception is an account with nothing stored yet, which adopts
+// this device's settings instead of wiping them.
+export async function pullSettings() {
+  const { settings } = await api.getSettings();
+  if (Object.keys(settings).length === 0) {
+    if (Object.keys(localSettings()).length) await api.saveSettings(localSettings());
+    return;
+  }
+  SYNCED_NAMES.forEach(k => (settings[k] ? localStorage.setItem(k, settings[k]) : localStorage.removeItem(k)));
+}
+
+let pushTimer;
+export function pushSettingsSoon() {
+  clearTimeout(pushTimer);
+  pushTimer = setTimeout(() => api.saveSettings(localSettings()).catch(() => {}), 800);
+}
 
 function fallbackModels(provider, model) {
   if (localStorage.getItem("use_fallbacks") !== "true") return [];
@@ -96,10 +127,7 @@ async function request(method, path, body) {
     headers: getHeaders(),
     body: body ? JSON.stringify(body) : undefined,
   });
-  if (res.status === 401) {
-    localStorage.removeItem("auth_token");
-    localStorage.removeItem("auth_email");
-  }
+  if (res.status === 401) clearSession();
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
     throw new Error(err.detail || "Request failed");
@@ -112,6 +140,8 @@ export const api = {
   register: (email, password) => request("POST", "/auth/register", { email, password }),
   login: (email, password) => request("POST", "/auth/login", { email, password }),
   logout: () => request("POST", "/auth/logout"),
+  getSettings: () => request("GET", "/settings"),
+  saveSettings: (settings) => request("PUT", "/settings", { settings }),
   me: () => request("GET", "/auth/me"),
 
   // Bots

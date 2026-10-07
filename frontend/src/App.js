@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect } from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import ChatsPage from "./pages/ChatsPage";
 import ChatPage from "./pages/ChatPage";
@@ -8,6 +8,7 @@ import LoginPage from "./pages/LoginPage";
 import AIChatsPage from "./pages/AIChatsPage";
 import AIChatPage from "./pages/AIChatPage";
 import BottomNav from "./components/BottomNav";
+import { pullSettings } from "./lib/api";
 import "./index.css";
 
 function RequireAuth({ children }) {
@@ -16,6 +17,10 @@ function RequireAuth({ children }) {
 }
 
 export default function App() {
+  useEffect(() => {
+    if (localStorage.getItem("auth_token")) pullSettings().catch(() => {});
+  }, []);
+
   return (
     <BrowserRouter>
       <div className="app-shell">

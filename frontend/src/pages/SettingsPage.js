@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { Eye, EyeOff, Send, Trash2, LogOut } from "lucide-react";
-import { api, PROVIDERS } from "../lib/api";
+import { api, PROVIDERS, clearSession, pushSettingsSoon } from "../lib/api";
 
 export default function SettingsPage() {
   const nav = useNavigate();
@@ -21,6 +21,9 @@ export default function SettingsPage() {
   const modelKey = p => PROVIDERS[p].modelKey;
   const defaultModel = p => PROVIDERS[p].defaultModel;
   const cfg = PROVIDERS[provider];
+  const providerModels = savedModels
+    .map((m, index) => ({ ...m, index }))
+    .filter(m => (m.provider || "huggingface") === provider);
 
   // Test chat
   const [testMessages, setTestMessages] = useState([]);
@@ -48,7 +51,7 @@ export default function SettingsPage() {
     testBottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [testMessages, testStreamText]);
 
-  function save(key, val) { localStorage.setItem(key, String(val)); }
+  function save(key, val) { localStorage.setItem(key, String(val)); pushSettingsSoon(); }
 
   function selectProvider(p) {
     setProvider(p);
@@ -62,21 +65,19 @@ export default function SettingsPage() {
     const entry = { name: newModelName.trim() || newModelStr.trim(), model: newModelStr.trim(), provider };
     const updated = [...savedModels, entry];
     setSavedModels(updated);
-    localStorage.setItem("saved_models", JSON.stringify(updated));
+    save("saved_models", JSON.stringify(updated));
     setNewModelStr(""); setNewModelName("");
   }
 
   function removeSavedModel(idx) {
     const updated = savedModels.filter((_, i) => i !== idx);
     setSavedModels(updated);
-    localStorage.setItem("saved_models", JSON.stringify(updated));
+    save("saved_models", JSON.stringify(updated));
   }
 
   function selectSavedModel(m) {
-    const p = m.provider || provider;
-    if (p !== provider) selectProvider(p);
     setModel(m.model);
-    save(modelKey(p), m.model);
+    save(modelKey(provider), m.model);
   }
 
   async function sendTestMessage() {
@@ -264,13 +265,13 @@ export default function SettingsPage() {
 
         {/* Saved model pills */}
         <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}>
-          {savedModels.length === 0 && (
+          {providerModels.length === 0 && (
             <div style={{ fontSize: 13, color: "var(--text3)" }}>No saved models yet.</div>
           )}
-          {savedModels.map((m, i) => {
-            const active = model === m.model && (m.provider || "huggingface") === provider;
+          {providerModels.map(m => {
+            const active = model === m.model;
             return (
-            <div key={i} style={{
+            <div key={m.index} style={{
               display: "flex", alignItems: "center", gap: 10,
               padding: "10px 12px", borderRadius: "var(--radius-sm)",
               background: active ? "var(--accent-bg2)" : "var(--bg3)",
@@ -280,16 +281,13 @@ export default function SettingsPage() {
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontSize: 15, color: active ? "var(--accent)" : "var(--text)" }}>
                   {m.name}
-                  <span style={{ fontSize: 10, color: "var(--text3)", marginLeft: 8, fontFamily: "var(--mono)", textTransform: "uppercase" }}>
-                    {PROVIDERS[m.provider || "huggingface"].short}
-                  </span>
                 </div>
                 <div style={{ fontSize: 11, fontFamily: "var(--mono)", color: "var(--text3)", marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                   {m.model}
                 </div>
               </div>
               <button className="btn-icon" style={{ color: "var(--text3)", flexShrink: 0 }}
-                onClick={e => { e.stopPropagation(); removeSavedModel(i); }}>
+                onClick={e => { e.stopPropagation(); removeSavedModel(m.index); }}>
                 ✕
               </button>
             </div>
@@ -299,9 +297,6 @@ export default function SettingsPage() {
 
         {/* Add new model */}
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          <div style={{ fontSize: 11, color: "var(--text3)" }}>
-            Saves for the currently selected provider ({cfg.label}).
-          </div>
           <input className="input" placeholder="Nickname (optional) — e.g. V4 Pro"
             value={newModelName} onChange={e => setNewModelName(e.target.value)}
             style={{ fontSize: 15 }} />
@@ -328,8 +323,7 @@ export default function SettingsPage() {
         </div>
         <button className="btn btn-ghost btn-sm" onClick={async () => {
           try { await api.logout(); } catch {}
-          localStorage.removeItem("auth_token");
-          localStorage.removeItem("auth_email");
+          clearSession();
           nav("/login", { replace: true });
         }}>
           <LogOut size={14} /> Log out

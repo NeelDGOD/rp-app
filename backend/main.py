@@ -1,4 +1,4 @@
-import os, re, json, uuid, secrets, asyncio, threading, time
+import os, re, json, uuid, secrets, asyncio, threading, time, base64, hashlib
 from datetime import datetime
 from typing import Optional
 from fastapi import FastAPI, HTTPException, Header, Depends
@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from huggingface_hub import InferenceClient
 from openai import OpenAI
 import bcrypt
+from cryptography.fernet import Fernet
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 TURSO_URL   = os.environ.get("TURSO_URL", "file:rp.db")
@@ -26,6 +27,12 @@ EMBED_MODEL   = "BAAI/bge-small-en-v1.5"
 RAG_TOP_K     = 3
 ADMIN_EMAIL   = "admin@chat.com"
 ADMIN_PASSWORD = "admin"
+KEYS_SECRET   = os.environ.get("KEYS_SECRET", "")
+SYNCED_SETTINGS = (
+    "hf_token", "openrouter_token", "nvidia_token", "gemini_token", "mistral_token", "groq_token",
+    "hf_model", "openrouter_model", "nvidia_model", "gemini_model", "mistral_model", "groq_model",
+    "llm_provider", "saved_models", "use_fallbacks",
+)
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -75,6 +82,7 @@ TABLE_COLS = {
                   "turn_counter", "created_at"],
     "memory_chunks": ["id", "branch_id", "content", "embedding", "created_at"],
     "ai_chats": ["id", "name", "history", "created_at", "updated_at", "user_id"],
+    "user_settings": ["user_id", "data"],
 }
 
 def rows(conn, sql, params=(), cols=None):
@@ -128,6 +136,9 @@ def init_db():
             history TEXT NOT NULL DEFAULT '[]',
             created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
             user_id TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS user_settings (
+            user_id TEXT PRIMARY KEY, data TEXT NOT NULL
         );
     """)
     conn.commit()
@@ -229,6 +240,32 @@ def me(user_id: str = Depends(require_user)):
     conn.close()
     if not u: raise HTTPException(404)
     return {"email": u["email"]}
+
+# ── SETTINGS (API keys + model choices, stored per account, encrypted at rest) ─
+def settings_cipher() -> Fernet:
+    if not KEYS_SECRET:
+        raise HTTPException(503, "KEYS_SECRET is not configured on the server")
+    return Fernet(base64.urlsafe_b64encode(hashlib.sha256(KEYS_SECRET.encode()).digest()))
+
+class SettingsPayload(BaseModel):
+    settings: dict
+
+@app.get("/settings")
+def get_settings(user_id: str = Depends(require_user)):
+    cipher = settings_cipher()
+    conn = get_db()
+    r = row(conn, "SELECT * FROM user_settings WHERE user_id=?", (user_id,), cols=TABLE_COLS["user_settings"])
+    conn.close()
+    return {"settings": json.loads(cipher.decrypt(r["data"].encode())) if r else {}}
+
+@app.put("/settings")
+def put_settings(data: SettingsPayload, user_id: str = Depends(require_user)):
+    cipher = settings_cipher()
+    settings = {k: v for k, v in data.settings.items() if k in SYNCED_SETTINGS and isinstance(v, str) and v}
+    conn = get_db()
+    q(conn, "INSERT OR REPLACE INTO user_settings VALUES (?,?)", (user_id, cipher.encrypt(json.dumps(settings).encode()).decode()))
+    conn.commit(); conn.close()
+    return {"ok": True}
 
 # ── MODELS ────────────────────────────────────────────────────────────────────
 class BotCreate(BaseModel):

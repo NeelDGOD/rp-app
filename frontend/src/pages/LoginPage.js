@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { api } from "../lib/api";
+import { api, pullSettings } from "../lib/api";
 
 export default function LoginPage() {
   const nav = useNavigate();
@@ -20,6 +20,7 @@ export default function LoginPage() {
         : await api.register(email.trim(), password);
       localStorage.setItem("auth_token", res.token);
       localStorage.setItem("auth_email", res.email);
+      await pullSettings().catch(() => {});
       nav("/chats", { replace: true });
     } catch (err) {
       setError(err.message);
