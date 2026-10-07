@@ -1,13 +1,59 @@
 const BASE = process.env.REACT_APP_API_URL || "http://localhost:8000";
 
+export const PROVIDERS = {
+  huggingface: {
+    label: "Hugging Face", short: "HF",
+    tokenKey: "hf_token", modelKey: "hf_model", defaultModel: "deepseek-ai/DeepSeek-V3",
+    tokenLabel: "Hugging Face Token", tokenPlaceholder: "hf_…",
+    modelHint: "Full model string", modelExample: "deepseek-ai/DeepSeek-V4-Pro:novita",
+  },
+  openrouter: {
+    label: "OpenRouter", short: "OpenRouter",
+    tokenKey: "openrouter_token", modelKey: "openrouter_model", defaultModel: "",
+    tokenLabel: "OpenRouter API Key", tokenPlaceholder: "sk-or-…",
+    modelHint: "Full model slug", modelExample: "anthropic/claude-sonnet-5",
+  },
+  nvidia: {
+    label: "NVIDIA", short: "NVIDIA",
+    tokenKey: "nvidia_token", modelKey: "nvidia_model", defaultModel: "deepseek-ai/deepseek-v4.1-flash",
+    tokenLabel: "NVIDIA API Key", tokenPlaceholder: "nvapi-…",
+    modelHint: "Model id from build.nvidia.com", modelExample: "deepseek-ai/deepseek-v4.1-flash",
+  },
+  gemini: {
+    label: "Gemini", short: "Gemini",
+    tokenKey: "gemini_token", modelKey: "gemini_model", defaultModel: "gemini-3.8-flash",
+    tokenLabel: "Google AI Studio API Key", tokenPlaceholder: "AIza…",
+    modelHint: "Gemini model id", modelExample: "gemini-3.8-flash",
+  },
+  mistral: {
+    label: "Mistral", short: "Mistral",
+    tokenKey: "mistral_token", modelKey: "mistral_model", defaultModel: "mistral-large-latest",
+    tokenLabel: "Mistral API Key", tokenPlaceholder: "Mistral API key",
+    modelHint: "Mistral model id", modelExample: "mistral-large-latest",
+  },
+  groq: {
+    label: "Groq", short: "Groq",
+    tokenKey: "groq_token", modelKey: "groq_model", defaultModel: "llama-3.3-70b-versatile",
+    tokenLabel: "Groq API Key", tokenPlaceholder: "gsk_…",
+    modelHint: "Groq model id", modelExample: "llama-3.3-70b-versatile",
+  },
+};
+
+function fallbackModels(provider, model) {
+  if (localStorage.getItem("use_fallbacks") !== "true") return [];
+  const saved = JSON.parse(localStorage.getItem("saved_models") || "[]");
+  return saved
+    .map(m => ({ provider: m.provider || "huggingface", model: m.model }))
+    .filter(m => !(m.provider === provider && m.model === model))
+    .map(m => ({ ...m, token: localStorage.getItem(PROVIDERS[m.provider].tokenKey) || "" }))
+    .filter(m => m.token);
+}
+
 function getHeaders() {
   const provider = localStorage.getItem("llm_provider") || "huggingface";
-  const token = localStorage.getItem(
-    provider === "openrouter" ? "openrouter_token" : "hf_token"
-  ) || "";
-  const model = localStorage.getItem(
-    provider === "openrouter" ? "openrouter_model" : "hf_model"
-  ) || (provider === "openrouter" ? "" : "deepseek-ai/DeepSeek-V3");
+  const cfg = PROVIDERS[provider];
+  const token = localStorage.getItem(cfg.tokenKey) || "";
+  const model = localStorage.getItem(cfg.modelKey) || cfg.defaultModel;
   const useRag = localStorage.getItem("use_rag") === "true";
   const authToken = localStorage.getItem("auth_token") || "";
   // RAG embeddings always go through HF's Inference API regardless of which
@@ -19,6 +65,7 @@ function getHeaders() {
     "x-hf-token": token,
     "x-model": model,
     "x-provider": provider,
+    "x-fallbacks": JSON.stringify(fallbackModels(provider, model)),
     "x-use-rag": String(useRag),
     "x-embed-token": embedToken,
     "x-auth-token": authToken,

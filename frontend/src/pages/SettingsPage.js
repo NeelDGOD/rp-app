@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { Eye, EyeOff, Send, Trash2, LogOut } from "lucide-react";
-import { api } from "../lib/api";
+import { api, PROVIDERS } from "../lib/api";
 
 export default function SettingsPage() {
   const nav = useNavigate();
@@ -11,14 +11,16 @@ export default function SettingsPage() {
   const [model, setModel]       = useState("deepseek-ai/DeepSeek-V3");
   const [autoMem, setAutoMem]   = useState(true);
   const [useRag, setUseRag]     = useState(false);
+  const [useFallbacks, setUseFallbacks] = useState(false);
   const [fontSize, setFontSize] = useState(17);
   const [savedModels, setSavedModels] = useState([]);
   const [newModelStr, setNewModelStr] = useState("");
   const [newModelName, setNewModelName] = useState("");
 
-  const tokenKey = p => (p === "openrouter" ? "openrouter_token" : "hf_token");
-  const modelKey = p => (p === "openrouter" ? "openrouter_model" : "hf_model");
-  const defaultModel = p => (p === "openrouter" ? "" : "deepseek-ai/DeepSeek-V3");
+  const tokenKey = p => PROVIDERS[p].tokenKey;
+  const modelKey = p => PROVIDERS[p].modelKey;
+  const defaultModel = p => PROVIDERS[p].defaultModel;
+  const cfg = PROVIDERS[provider];
 
   // Test chat
   const [testMessages, setTestMessages] = useState([]);
@@ -34,6 +36,7 @@ export default function SettingsPage() {
     setModel(localStorage.getItem(modelKey(p)) || defaultModel(p));
     setAutoMem(localStorage.getItem("auto_memory") !== "false");
     setUseRag(localStorage.getItem("use_rag") === "true");
+    setUseFallbacks(localStorage.getItem("use_fallbacks") === "true");
     setFontSize(parseInt(localStorage.getItem("font_size") || "17"));
     try {
       const saved = JSON.parse(localStorage.getItem("saved_models") || "[]");
@@ -118,20 +121,16 @@ export default function SettingsPage() {
         <div style={{ fontSize: 12, fontFamily: "var(--mono)", color: "var(--text3)", marginBottom: 8, letterSpacing: "0.5px", textTransform: "uppercase" }}>
           Provider
         </div>
-        <div style={{ display: "flex", gap: 8 }}>
-          {[
-            { id: "huggingface", label: "Hugging Face" },
-            { id: "openrouter", label: "OpenRouter" },
-          ].map(p => (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8 }}>
+          {Object.entries(PROVIDERS).map(([id, p]) => (
             <button
-              key={p.id}
+              key={id}
               className="btn btn-sm"
-              onClick={() => selectProvider(p.id)}
+              onClick={() => selectProvider(id)}
               style={{
-                flex: 1,
-                background: provider === p.id ? "var(--accent-bg2)" : "var(--bg3)",
-                border: `1px solid ${provider === p.id ? "var(--accent)" : "var(--border)"}`,
-                color: provider === p.id ? "var(--accent)" : "var(--text2)",
+                background: provider === id ? "var(--accent-bg2)" : "var(--bg3)",
+                border: `1px solid ${provider === id ? "var(--accent)" : "var(--border)"}`,
+                color: provider === id ? "var(--accent)" : "var(--text2)",
               }}
             >
               {p.label}
@@ -145,7 +144,7 @@ export default function SettingsPage() {
       {/* ── TOKEN ── */}
       <div style={{ padding: "16px 16px 0" }}>
         <div style={{ fontSize: 12, fontFamily: "var(--mono)", color: "var(--text3)", marginBottom: 8, letterSpacing: "0.5px", textTransform: "uppercase" }}>
-          {provider === "openrouter" ? "OpenRouter API Key" : "Hugging Face Token"}
+          {cfg.tokenLabel}
         </div>
         <div style={{ position: "relative" }}>
           <input
@@ -156,7 +155,7 @@ export default function SettingsPage() {
             data-1p-ignore="true"
             className="input"
             type={showToken ? "text" : "password"}
-            placeholder={provider === "openrouter" ? "sk-or-…" : "hf_…"}
+            placeholder={cfg.tokenPlaceholder}
             value={token}
             onChange={e => { setToken(e.target.value); save(tokenKey(provider), e.target.value); }}
             style={{ paddingRight: 44, fontFamily: "var(--mono)", fontSize: 14 }}
@@ -181,17 +180,13 @@ export default function SettingsPage() {
         </div>
         <input
           className="input"
-          placeholder={provider === "openrouter" ? "openai/gpt-4o" : "deepseek-ai/DeepSeek-V3"}
+          placeholder={cfg.modelExample}
           value={model}
           onChange={e => { setModel(e.target.value); save(modelKey(provider), e.target.value); }}
           style={{ fontFamily: "var(--mono)", fontSize: 14 }}
         />
         <div style={{ fontSize: 12, color: "var(--text3)", marginTop: 6 }}>
-          {provider === "openrouter" ? (
-            <>Full model slug e.g. <span style={{ color: "var(--text2)", fontFamily: "var(--mono)" }}>anthropic/claude-sonnet-5</span></>
-          ) : (
-            <>Full model string e.g. <span style={{ color: "var(--text2)", fontFamily: "var(--mono)" }}>deepseek-ai/DeepSeek-V4-Pro:novita</span></>
-          )}
+          {cfg.modelHint} e.g. <span style={{ color: "var(--text2)", fontFamily: "var(--mono)" }}>{cfg.modelExample}</span>
         </div>
       </div>
 
@@ -221,6 +216,21 @@ export default function SettingsPage() {
         <label className="toggle">
           <input type="checkbox" checked={useRag} onChange={e => {
             setUseRag(e.target.checked); save("use_rag", e.target.checked);
+          }} />
+          <div className="toggle-track" />
+          <div className="toggle-thumb" />
+        </label>
+      </div>
+
+      {/* ── MODEL FALLBACK ── */}
+      <div className="settings-item">
+        <div>
+          <div className="settings-label">Fall Back to Saved Models</div>
+          <div className="settings-sub">If the current model fails before replying, try your other saved models in list order</div>
+        </div>
+        <label className="toggle">
+          <input type="checkbox" checked={useFallbacks} onChange={e => {
+            setUseFallbacks(e.target.checked); save("use_fallbacks", e.target.checked);
           }} />
           <div className="toggle-track" />
           <div className="toggle-thumb" />
@@ -271,7 +281,7 @@ export default function SettingsPage() {
                 <div style={{ fontSize: 15, color: active ? "var(--accent)" : "var(--text)" }}>
                   {m.name}
                   <span style={{ fontSize: 10, color: "var(--text3)", marginLeft: 8, fontFamily: "var(--mono)", textTransform: "uppercase" }}>
-                    {(m.provider || "huggingface") === "openrouter" ? "OpenRouter" : "HF"}
+                    {PROVIDERS[m.provider || "huggingface"].short}
                   </span>
                 </div>
                 <div style={{ fontSize: 11, fontFamily: "var(--mono)", color: "var(--text3)", marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
@@ -290,13 +300,13 @@ export default function SettingsPage() {
         {/* Add new model */}
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           <div style={{ fontSize: 11, color: "var(--text3)" }}>
-            Saves for the currently selected provider ({provider === "openrouter" ? "OpenRouter" : "Hugging Face"}).
+            Saves for the currently selected provider ({cfg.label}).
           </div>
           <input className="input" placeholder="Nickname (optional) — e.g. V4 Pro"
             value={newModelName} onChange={e => setNewModelName(e.target.value)}
             style={{ fontSize: 15 }} />
           <div style={{ display: "flex", gap: 8 }}>
-            <input className="input" placeholder={provider === "openrouter" ? "openai/gpt-4o" : "deepseek-ai/DeepSeek-V4-Pro:novita"}
+            <input className="input" placeholder={cfg.modelExample}
               value={newModelStr} onChange={e => setNewModelStr(e.target.value)}
               onKeyDown={e => e.key === "Enter" && addSavedModel()}
               style={{ flex: 1, fontFamily: "var(--mono)", fontSize: 13 }} />

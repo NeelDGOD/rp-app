@@ -13,7 +13,13 @@ import bcrypt
 TURSO_URL   = os.environ.get("TURSO_URL", "file:rp.db")
 TURSO_TOKEN = os.environ.get("TURSO_TOKEN", "")
 DEFAULT_MODEL = "deepseek-ai/DeepSeek-V3"
-OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+OPENAI_COMPAT_BASE_URLS = {
+    "openrouter": "https://openrouter.ai/api/v1",
+    "nvidia": "https://integrate.api.nvidia.com/v1",
+    "gemini": "https://generativelanguage.googleapis.com/v1beta/openai/",
+    "mistral": "https://api.mistral.ai/v1",
+    "groq": "https://api.groq.com/openai/v1",
+}
 MAX_CONTEXT   = 20
 MEM_INTERVAL  = 6
 EMBED_MODEL   = "BAAI/bge-small-en-v1.5"
@@ -315,15 +321,29 @@ def build_send_history(history: list, memory: str, resume: Optional[dict] = None
 def get_client(provider: str, token: str, model: str):
     """Return (chat client, model id) for the requested provider.
     "huggingface" expects a "repo_id:provider" model string (as copied from
-    HF's model page); "openrouter" takes the model slug as-is via OpenRouter's
-    OpenAI-compatible API."""
-    if provider == "openrouter":
-        return OpenAI(api_key=token, base_url=OPENROUTER_BASE_URL), model
+    HF's model page); every provider in OPENAI_COMPAT_BASE_URLS takes the model
+    id as-is via its OpenAI-compatible API."""
+    if provider in OPENAI_COMPAT_BASE_URLS:
+        return OpenAI(api_key=token, base_url=OPENAI_COMPAT_BASE_URLS[provider]), model
     if ":" in model:
         repo_id, hf_provider = model.split(":", 1)
     else:
         repo_id, hf_provider = model, "auto"
     return InferenceClient(provider=hf_provider, api_key=token), repo_id
+
+def llm_candidates(x_hf_token: str = Header(...), x_model: str = Header(default=DEFAULT_MODEL),
+                   x_provider: str = Header(default="huggingface"), x_fallbacks: str = Header(default="[]")) -> list:
+    """The selected (provider, token, model) followed by the user's fallbacks, in order."""
+    return [(x_provider, x_hf_token, x_model)] + [(f["provider"], f["token"], f["model"]) for f in json.loads(x_fallbacks)]
+
+def complete(llm: list, messages: list) -> str:
+    for i, (provider, token, model) in enumerate(llm):
+        client, model_id = get_client(provider, token, model)
+        try:
+            return client.chat.completions.create(model=model_id, messages=messages).choices[0].message.content
+        except Exception:
+            if i == len(llm) - 1:
+                raise
 
 # Provider SDKs iterate the stream synchronously (blocking network I/O per chunk).
 # Running that directly inside an `async def` route blocks the whole event loop,
@@ -336,15 +356,27 @@ class _KeepAlive:
 KEEPALIVE = _KeepAlive()
 KEEPALIVE_INTERVAL = 15  # seconds of silence tolerated before emitting a heartbeat
 
-def stream_chat(client, model: str, messages: list):
+def stream_chat(llm: list, messages: list):
     queue: asyncio.Queue = asyncio.Queue()
     loop = asyncio.get_event_loop()
     done = object()
 
     def worker():
         try:
-            for chunk in client.chat.completions.create(model=model, messages=messages, stream=True):
-                loop.call_soon_threadsafe(queue.put_nowait, chunk)
+            for i, (provider, token, model) in enumerate(llm):
+                client, model_id = get_client(provider, token, model)
+                started = False
+                try:
+                    for chunk in client.chat.completions.create(model=model_id, messages=messages, stream=True):
+                        if chunk.choices and chunk.choices[0].delta.content:
+                            started = True
+                        loop.call_soon_threadsafe(queue.put_nowait, chunk)
+                    return
+                except Exception:
+                    # Once text has reached the user, switching models would splice
+                    # two different replies together, so only fall back before that.
+                    if started or i == len(llm) - 1:
+                        raise
         except Exception as e:
             loop.call_soon_threadsafe(queue.put_nowait, e)
         finally:
@@ -371,8 +403,7 @@ def stream_chat(client, model: str, messages: list):
 
     return gen()
 
-def do_memory_update(history: list, current_memory: str, provider: str, token: str, model: str, director_note: str = "") -> tuple:
-    client, model = get_client(provider, token, model)
+def do_memory_update(history: list, current_memory: str, llm: list, director_note: str = "") -> tuple:
     text = "\n".join(
         f"{'User' if m['role']=='user' else 'Bot'}: {m['content']}"
         for m in history[-20:] if m["role"] in ("user", "assistant")
@@ -401,7 +432,7 @@ CURRENT SCENE:
 EMOTIONAL STATE:{directive_block}"""},
         {"role": "user", "content": f"EXISTING MEMORY:\n{current_memory or '(none yet)'}\n\nNEW CONVERSATION:\n{text}\n\nReturn the fully updated memory document."}
     ]
-    raw = client.chat.completions.create(model=model, messages=prompt).choices[0].message.content
+    raw = complete(llm, prompt)
 
     new_note = director_note
     m = re.search(r"DIRECTOR_NOTE:\s*(KEEP|DROP)", raw, re.IGNORECASE)
@@ -621,8 +652,7 @@ def clone_chat(chat_id: str, data: Rename, user_id: str = Depends(require_user))
 # ── SEND (STREAMING) ──────────────────────────────────────────────────────────
 @app.post("/chats/{chat_id}/send")
 async def send_message(chat_id: str, data: SendMsg,
-                       x_hf_token: str = Header(...), x_model: str = Header(default=DEFAULT_MODEL),
-                       x_provider: str = Header(default="huggingface"),
+                       llm: list = Depends(llm_candidates),
                        x_use_rag: str = Header(default="false"),
                        x_embed_token: str = Header(default=""),
                        user_id: str = Depends(require_user)):
@@ -679,12 +709,10 @@ async def send_message(chat_id: str, data: SendMsg,
     send_hist.append({"role": "user", "content": cleaned})
     b["history"].append({"role": "user", "content": cleaned})
 
-    client, model = get_client(x_provider, x_hf_token, x_model)
-
     async def stream():
         full = ""
         try:
-            async for chunk in stream_chat(client, model, send_hist):
+            async for chunk in stream_chat(llm, send_hist):
                 if chunk is KEEPALIVE:
                     yield ": keepalive\n\n"
                     continue
@@ -708,8 +736,7 @@ async def send_message(chat_id: str, data: SendMsg,
 # ── RETRY (NEW BRANCH) ────────────────────────────────────────────────────────
 @app.post("/chats/{chat_id}/retry")
 async def retry_message(chat_id: str, data: RetryMsg,
-                        x_hf_token: str = Header(...), x_model: str = Header(default=DEFAULT_MODEL),
-                        x_provider: str = Header(default="huggingface"),
+                        llm: list = Depends(llm_candidates),
                         user_id: str = Depends(require_user)):
     chat_owned(chat_id, user_id)
     parent = get_branch_data(data.branch_id)
@@ -721,12 +748,11 @@ async def retry_message(chat_id: str, data: RetryMsg,
         send_hist.append({"role": "system", "content": f"RETRY DIRECTION: {data.hint}"})
 
     new_bid = str(uuid.uuid4()); n = ts()
-    client, model = get_client(x_provider, x_hf_token, x_model)
 
     async def stream():
         full = ""
         try:
-            async for chunk in stream_chat(client, model, send_hist):
+            async for chunk in stream_chat(llm, send_hist):
                 if chunk is KEEPALIVE:
                     yield ": keepalive\n\n"
                     continue
@@ -767,14 +793,13 @@ def undo(branch_id: str, user_id: str = Depends(require_user)):
 
 # ── MEMORY ────────────────────────────────────────────────────────────────────
 @app.post("/branches/{branch_id}/memory")
-def update_memory(branch_id: str, x_hf_token: str = Header(...), x_model: str = Header(default=DEFAULT_MODEL),
-                  x_provider: str = Header(default="huggingface"),
+def update_memory(branch_id: str, llm: list = Depends(llm_candidates),
                   x_use_rag: str = Header(default="false"), x_embed_token: str = Header(default=""),
                   user_id: str = Depends(require_user)):
     branch_owned(branch_id, user_id)
     b = get_branch_data(branch_id)
     try:
-        new_mem, new_note = do_memory_update(b["history"], b["memory"], x_provider, x_hf_token, x_model, b["director_note"])
+        new_mem, new_note = do_memory_update(b["history"], b["memory"], llm, b["director_note"])
         save_branch(branch_id, b["history"], new_mem, b["turn_counter"], new_note)
         if x_use_rag.lower() == "true" and x_embed_token:
             # The memory document above is already saved — a broken/unauthorized
@@ -851,8 +876,7 @@ class EditUserMsg(BaseModel):
 
 @app.post("/chats/{chat_id}/edit-user")
 async def edit_user_message(chat_id: str, data: EditUserMsg,
-                            x_hf_token: str = Header(...), x_model: str = Header(default=DEFAULT_MODEL),
-                            x_provider: str = Header(default="huggingface"),
+                            llm: list = Depends(llm_candidates),
                             user_id: str = Depends(require_user)):
     chat_owned(chat_id, user_id)
     parent = get_branch_data(data.branch_id)
@@ -871,12 +895,11 @@ async def edit_user_message(chat_id: str, data: EditUserMsg,
         send_hist.append({"role": "system", "content": f"ONGOING DIRECTOR NOTE (stays in effect until the user changes or clears it): {parent['director_note']}"})
 
     new_bid = str(uuid.uuid4()); n = ts()
-    client, model = get_client(x_provider, x_hf_token, x_model)
 
     async def stream():
         full = ""
         try:
-            async for chunk in stream_chat(client, model, send_hist):
+            async for chunk in stream_chat(llm, send_hist):
                 if chunk is KEEPALIVE:
                     yield ": keepalive\n\n"
                     continue
@@ -908,15 +931,11 @@ class TestMsg(BaseModel):
 
 @app.post("/test-chat")
 async def test_chat(data: TestMsg,
-                    x_hf_token: str = Header(...),
-                    x_model: str = Header(default=DEFAULT_MODEL),
-                    x_provider: str = Header(default="huggingface"),
+                    llm: list = Depends(llm_candidates),
                     user_id: str = Depends(require_user)):
-    client, model = get_client(x_provider, x_hf_token, x_model)
-
     async def stream():
         try:
-            async for chunk in stream_chat(client, model, data.messages):
+            async for chunk in stream_chat(llm, data.messages):
                 if chunk is KEEPALIVE:
                     yield ": keepalive\n\n"
                     continue
@@ -969,8 +988,7 @@ def delete_ai_chat(chat_id: str, user_id: str = Depends(require_user)):
 
 @app.post("/ai-chats/{chat_id}/send")
 async def send_ai_message(chat_id: str, data: AIChatSendMsg,
-                          x_hf_token: str = Header(...), x_model: str = Header(default=DEFAULT_MODEL),
-                          x_provider: str = Header(default="huggingface"),
+                          llm: list = Depends(llm_candidates),
                           user_id: str = Depends(require_user)):
     c = ai_chat_owned(chat_id, user_id)
     history = json.loads(c["history"])
@@ -980,12 +998,10 @@ async def send_ai_message(chat_id: str, data: AIChatSendMsg,
     history.append({"role": "user", "content": ai_msg_content(data.content, data.images)})
     send_hist = build_send_history(history, "")
 
-    client, model = get_client(x_provider, x_hf_token, x_model)
-
     async def stream():
         full = ""
         try:
-            async for chunk in stream_chat(client, model, send_hist):
+            async for chunk in stream_chat(llm, send_hist):
                 if chunk is KEEPALIVE:
                     yield ": keepalive\n\n"
                     continue
