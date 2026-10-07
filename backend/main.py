@@ -310,7 +310,8 @@ def resume_injection(memory: str) -> Optional[dict]:
     return {"role": "system", "content": "\n".join(parts)}
 
 def build_send_history(history: list, memory: str, resume: Optional[dict] = None) -> list:
-    send = [history[0]] + history[-MAX_CONTEXT:]
+    # Stored messages carry extra fields (e.g. "model") that strict providers reject.
+    send = [{"role": m["role"], "content": m["content"]} for m in [history[0]] + history[-MAX_CONTEXT:]]
     i = 1
     if memory:
         send.insert(i, {"role": "system", "content": f"RP MEMORY:\n{memory}"}); i += 1
@@ -356,7 +357,18 @@ class _KeepAlive:
 KEEPALIVE = _KeepAlive()
 KEEPALIVE_INTERVAL = 15  # seconds of silence tolerated before emitting a heartbeat
 
+class LLMStream:
+    """Async-iterable chunk stream; `model` names the candidate that served it."""
+    model = ""
+
+    def __init__(self):
+        self.gen = None
+
+    def __aiter__(self):
+        return self.gen
+
 def stream_chat(llm: list, messages: list):
+    result = LLMStream()
     queue: asyncio.Queue = asyncio.Queue()
     loop = asyncio.get_event_loop()
     done = object()
@@ -370,6 +382,7 @@ def stream_chat(llm: list, messages: list):
                     for chunk in client.chat.completions.create(model=model_id, messages=messages, stream=True):
                         if chunk.choices and chunk.choices[0].delta.content:
                             started = True
+                            result.model = f"{provider} / {model}"
                         loop.call_soon_threadsafe(queue.put_nowait, chunk)
                     return
                 except Exception:
@@ -401,7 +414,8 @@ def stream_chat(llm: list, messages: list):
                 raise item
             yield item
 
-    return gen()
+    result.gen = gen()
+    return result
 
 def do_memory_update(history: list, current_memory: str, llm: list, director_note: str = "") -> tuple:
     text = "\n".join(
@@ -712,7 +726,8 @@ async def send_message(chat_id: str, data: SendMsg,
     async def stream():
         full = ""
         try:
-            async for chunk in stream_chat(llm, send_hist):
+            reply = stream_chat(llm, send_hist)
+            async for chunk in reply:
                 if chunk is KEEPALIVE:
                     yield ": keepalive\n\n"
                     continue
@@ -722,7 +737,7 @@ async def send_message(chat_id: str, data: SendMsg,
                 if delta:
                     full += delta
                     yield f"data: {json.dumps({'type':'delta','content':delta})}\n\n"
-            b["history"].append({"role": "assistant", "content": full})
+            b["history"].append({"role": "assistant", "content": full, "model": reply.model})
             b["turn_counter"] += 1
             needs_mem = b["turn_counter"] % MEM_INTERVAL == 0
             save_branch(data.branch_id, b["history"], b["memory"], b["turn_counter"], b["director_note"])
@@ -752,7 +767,8 @@ async def retry_message(chat_id: str, data: RetryMsg,
     async def stream():
         full = ""
         try:
-            async for chunk in stream_chat(llm, send_hist):
+            reply = stream_chat(llm, send_hist)
+            async for chunk in reply:
                 if chunk is KEEPALIVE:
                     yield ": keepalive\n\n"
                     continue
@@ -762,7 +778,7 @@ async def retry_message(chat_id: str, data: RetryMsg,
                 if delta:
                     full += delta
                     yield f"data: {json.dumps({'type':'delta','content':delta})}\n\n"
-            new_hist = hist_base + [{"role": "assistant", "content": full}]
+            new_hist = hist_base + [{"role": "assistant", "content": full, "model": reply.model}]
             needs_mem = parent["turn_counter"] % MEM_INTERVAL == 0
             def _persist():
                 conn = get_db()
@@ -899,7 +915,8 @@ async def edit_user_message(chat_id: str, data: EditUserMsg,
     async def stream():
         full = ""
         try:
-            async for chunk in stream_chat(llm, send_hist):
+            reply = stream_chat(llm, send_hist)
+            async for chunk in reply:
                 if chunk is KEEPALIVE:
                     yield ": keepalive\n\n"
                     continue
@@ -909,7 +926,7 @@ async def edit_user_message(chat_id: str, data: EditUserMsg,
                 if delta:
                     full += delta
                     yield f"data: {json.dumps({'type':'delta','content':delta})}\n\n"
-            new_hist = hist_base + [{"role": "assistant", "content": full}]
+            new_hist = hist_base + [{"role": "assistant", "content": full, "model": reply.model}]
             needs_mem = parent["turn_counter"] % MEM_INTERVAL == 0
             def _persist():
                 conn = get_db()

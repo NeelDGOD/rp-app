@@ -646,6 +646,9 @@ function MessageBubble({ msg, fontSize, isStreaming, visibleIndex,
     return (
       <div style={{ display: "flex", justifyContent: isUser ? "flex-end" : "flex-start", marginBottom: 12 }}>
         <div style={{ maxWidth: "90%", width: "90%", display: "flex", flexDirection: "column", gap: 8 }}>
+          {msg.model && (
+            <div style={{ fontSize: 11, fontFamily: "var(--mono)", color: "var(--text3)" }}>{msg.model}</div>
+          )}
           <textarea
             autoFocus
             value={editText}
