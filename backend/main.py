@@ -20,6 +20,7 @@ OPENAI_COMPAT_BASE_URLS = {
     "gemini": "https://generativelanguage.googleapis.com/v1beta/openai/",
     "mistral": "https://api.mistral.ai/v1",
     "groq": "https://api.groq.com/openai/v1",
+    "navy": "https://api.navy/v1",
 }
 MAX_CONTEXT   = 20
 MEM_INTERVAL  = 6
@@ -29,8 +30,8 @@ ADMIN_EMAIL   = "admin@chat.com"
 ADMIN_PASSWORD = "admin"
 KEYS_SECRET   = os.environ.get("KEYS_SECRET", "")
 SYNCED_SETTINGS = (
-    "hf_token", "openrouter_token", "nvidia_token", "gemini_token", "mistral_token", "groq_token",
-    "hf_model", "openrouter_model", "nvidia_model", "gemini_model", "mistral_model", "groq_model",
+    "hf_token", "openrouter_token", "nvidia_token", "gemini_token", "mistral_token", "groq_token", "navy_token",
+    "hf_model", "openrouter_model", "nvidia_model", "gemini_model", "mistral_model", "groq_model", "navy_model",
     "llm_provider", "saved_models", "use_fallbacks",
 )
 

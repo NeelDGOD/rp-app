@@ -37,6 +37,12 @@ export const PROVIDERS = {
     tokenLabel: "Groq API Key", tokenPlaceholder: "gsk_…",
     modelHint: "Groq model id", modelExample: "llama-3.3-70b-versatile",
   },
+  navy: {
+    label: "NavyAI",
+    tokenKey: "navy_token", modelKey: "navy_model", defaultModel: "",
+    tokenLabel: "NavyAI API Key", tokenPlaceholder: "sk-navy-…",
+    modelHint: "Model id from NavyAI's model list", modelExample: "model-id-from-api.navy",
+  },
 };
 
 const SYNCED_NAMES = [
