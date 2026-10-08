@@ -99,6 +99,22 @@ def row(conn, sql, params=(), cols=None):
     r = rows(conn, sql, params, cols)
     return r[0] if r else None
 
+TRANSIENT_DB_ERRORS = ("Stream already in use", "stream not found")
+
+def with_db_retry(fn):
+    """Run a block of database work, retrying on libsql's transient Hrana stream
+    errors — 'stream already in use' (concurrent requests racing on the same
+    underlying stream) and 'stream not found' (the server dropped it) — instead
+    of surfacing them to the user or crashing startup."""
+    for attempt in range(3):
+        try:
+            return fn()
+        except Exception as e:
+            if any(msg in str(e) for msg in TRANSIENT_DB_ERRORS) and attempt < 2:
+                time.sleep(0.3 * (attempt + 1))
+                continue
+            raise
+
 def init_db():
     conn = get_db()
     conn.executescript("""
@@ -148,7 +164,7 @@ def init_db():
     conn.commit()
     conn.close()
 
-init_db()
+with_db_retry(init_db)
 
 # ── AUTH ──────────────────────────────────────────────────────────────────────
 def hash_password(pw: str) -> str:
@@ -185,7 +201,7 @@ def run_migrations():
     conn.commit()
     conn.close()
 
-run_migrations()
+with_db_retry(run_migrations)
 
 def require_user(x_auth_token: str = Header(...)) -> str:
     conn = get_db()
@@ -548,19 +564,6 @@ def get_branch_data(branch_id: str) -> dict:
     if not b["history"]:
         b["history"] = []
     return b
-
-def with_db_retry(fn):
-    """Run a block of database work, retrying on libsql's transient 'stream
-    already in use' conflict (concurrent requests racing on the same
-    underlying Hrana stream) instead of surfacing it to the user."""
-    for attempt in range(3):
-        try:
-            return fn()
-        except Exception as e:
-            if "Stream already in use" in str(e) and attempt < 2:
-                time.sleep(0.3 * (attempt + 1))
-                continue
-            raise
 
 def db_write(sql: str, params: tuple = ()):
     def _do():
