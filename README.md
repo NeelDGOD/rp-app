@@ -23,7 +23,7 @@
 - Deploy
 
 ### 4. First run
-- Open the app → Settings → paste your HF token
+- Open the app → Settings → pick a provider (Gemini recommended) and paste its API key
 - Go to Bots → create a bot
 - Go to Chats → start chatting
 # rp-app

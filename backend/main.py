@@ -5,15 +5,16 @@ from fastapi import FastAPI, HTTPException, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from huggingface_hub import InferenceClient
+# from huggingface_hub import InferenceClient
 from openai import OpenAI
 import bcrypt
+import httpx
 from cryptography.fernet import Fernet
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 TURSO_URL   = os.environ.get("TURSO_URL", "file:rp.db")
 TURSO_TOKEN = os.environ.get("TURSO_TOKEN", "")
-DEFAULT_MODEL = "deepseek-ai/DeepSeek-V3"
+DEFAULT_MODEL = "gemini-3.8-flash"
 OPENAI_COMPAT_BASE_URLS = {
     "openrouter": "https://openrouter.ai/api/v1",
     "nvidia": "https://integrate.api.nvidia.com/v1",
@@ -24,14 +25,16 @@ OPENAI_COMPAT_BASE_URLS = {
 }
 MAX_CONTEXT   = 20
 MEM_INTERVAL  = 6
-EMBED_MODEL   = "BAAI/bge-small-en-v1.5"
+EMBED_MODEL   = "gemini-embedding-001"
+EMBED_DIMS    = 768
 RAG_TOP_K     = 3
 ADMIN_EMAIL   = "admin@chat.com"
 ADMIN_PASSWORD = "admin"
 KEYS_SECRET   = os.environ.get("KEYS_SECRET", "")
 SYNCED_SETTINGS = (
-    "hf_token", "openrouter_token", "nvidia_token", "gemini_token", "mistral_token", "groq_token", "navy_token",
-    "hf_model", "openrouter_model", "nvidia_model", "gemini_model", "mistral_model", "groq_model", "navy_model",
+    # "hf_token", "hf_model",
+    "openrouter_token", "nvidia_token", "gemini_token", "mistral_token", "groq_token", "navy_token",
+    "openrouter_model", "nvidia_model", "gemini_model", "mistral_model", "groq_model", "navy_model",
     "llm_provider", "saved_models", "use_fallbacks",
 )
 
@@ -358,20 +361,19 @@ def build_send_history(history: list, memory: str, resume: Optional[dict] = None
     return send
 
 def get_client(provider: str, token: str, model: str):
-    """Return (chat client, model id) for the requested provider.
-    "huggingface" expects a "repo_id:provider" model string (as copied from
-    HF's model page); every provider in OPENAI_COMPAT_BASE_URLS takes the model
-    id as-is via its OpenAI-compatible API."""
-    if provider in OPENAI_COMPAT_BASE_URLS:
-        return OpenAI(api_key=token, base_url=OPENAI_COMPAT_BASE_URLS[provider]), model
-    if ":" in model:
-        repo_id, hf_provider = model.split(":", 1)
-    else:
-        repo_id, hf_provider = model, "auto"
-    return InferenceClient(provider=hf_provider, api_key=token), repo_id
+    """Return (chat client, model id) for the requested provider. Every provider
+    in OPENAI_COMPAT_BASE_URLS takes the model id as-is via its OpenAI-compatible API."""
+    return OpenAI(api_key=token, base_url=OPENAI_COMPAT_BASE_URLS[provider]), model
+    # Hugging Face (disabled: free accounts no longer get Inference Providers credits).
+    # "huggingface" expects a "repo_id:provider" model string as copied from HF's model page.
+    # if ":" in model:
+    #     repo_id, hf_provider = model.split(":", 1)
+    # else:
+    #     repo_id, hf_provider = model, "auto"
+    # return InferenceClient(provider=hf_provider, api_key=token), repo_id
 
 def llm_candidates(x_hf_token: str = Header(...), x_model: str = Header(default=DEFAULT_MODEL),
-                   x_provider: str = Header(default="huggingface"), x_fallbacks: str = Header(default="[]")) -> list:
+                   x_provider: str = Header(default="gemini"), x_fallbacks: str = Header(default="[]")) -> list:
     """The selected (provider, token, model) followed by the user's fallbacks, in order."""
     return [(x_provider, x_hf_token, x_model)] + [(f["provider"], f["token"], f["model"]) for f in json.loads(x_fallbacks)]
 
@@ -495,23 +497,18 @@ EMOTIONAL STATE:{directive_block}"""},
     return raw, new_note
 
 # ── RAG (memory chunk embedding + retrieval) ─────────────────────────────────
-# Embeddings are computed remotely via HF's Inference API rather than loading
+# Embeddings are computed remotely via Gemini's API rather than loading
 # sentence-transformers/torch in-process — that combo's memory footprint was
 # what kept OOM-killing the server on free-tier hosts.
-def embed_text(text: str, token: str) -> list:
-    # "auto" does a live lookup of which provider currently has this model
-    # deployed rather than pinning to one provider that might not have it
-    # warm right now — pinning to hf-inference specifically was the cause
-    # of the "model not supported" failures.
-    client = InferenceClient(provider="auto", api_key=token)
-    vec = client.feature_extraction(text, model=EMBED_MODEL)
-    arr = vec.tolist() if hasattr(vec, "tolist") else list(vec)
-    if arr and isinstance(arr[0], list):
-        # Some providers return per-token embeddings instead of one pooled
-        # sentence vector — mean-pool across tokens ourselves in that case.
-        n = len(arr)
-        arr = [sum(col) / n for col in zip(*arr)]
-    return arr
+def embed_text(text: str, token: str, task: str) -> list:
+    r = httpx.post(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{EMBED_MODEL}:embedContent",
+        headers={"x-goog-api-key": token},
+        json={"content": {"parts": [{"text": text}]}, "taskType": task, "outputDimensionality": EMBED_DIMS},
+        timeout=30,
+    )
+    r.raise_for_status()
+    return r.json()["embedding"]["values"]
 
 def cosine_similarity(a: list, b: list) -> float:
     dot = sum(x * y for x, y in zip(a, b))
@@ -524,7 +521,7 @@ def cosine_similarity(a: list, b: list) -> float:
 def store_memory_chunk(branch_id: str, content: str, token: str):
     conn = get_db()
     q(conn, "INSERT INTO memory_chunks VALUES (?,?,?,?,?)",
-      (str(uuid.uuid4()), branch_id, content, json.dumps(embed_text(content, token)), ts()))
+      (str(uuid.uuid4()), branch_id, content, json.dumps(embed_text(content, token, "RETRIEVAL_DOCUMENT")), ts()))
     conn.commit(); conn.close()
 
 def retrieve_relevant_chunks(branch_id: str, query: str, token: str, k: int = RAG_TOP_K) -> list:
@@ -533,8 +530,11 @@ def retrieve_relevant_chunks(branch_id: str, query: str, token: str, k: int = RA
     conn.close()
     if not chunks:
         return []
-    query_vec = embed_text(query, token)
-    scored = [(cosine_similarity(query_vec, json.loads(c["embedding"])), c["content"]) for c in chunks]
+    query_vec = embed_text(query, token, "RETRIEVAL_QUERY")
+    # Chunks stored by the earlier HF bge-small model have a different vector
+    # length and can't be compared against Gemini vectors, so they're skipped.
+    scored = [(cosine_similarity(query_vec, vec), c["content"])
+              for c in chunks if len(vec := json.loads(c["embedding"])) == len(query_vec)]
     scored.sort(key=lambda x: x[0], reverse=True)
     return [content for _, content in scored[:k]]
 

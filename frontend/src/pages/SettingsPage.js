@@ -1,14 +1,14 @@
 import React, { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { Eye, EyeOff, Send, Trash2, LogOut } from "lucide-react";
-import { api, PROVIDERS, clearSession, pushSettingsSoon } from "../lib/api";
+import { api, PROVIDERS, clearSession, pushSettingsSoon, currentProvider } from "../lib/api";
 
 export default function SettingsPage() {
   const nav = useNavigate();
-  const [provider, setProvider] = useState("huggingface");
+  const [provider, setProvider] = useState(currentProvider);
   const [token, setToken]       = useState("");
   const [showToken, setShowToken] = useState(false);
-  const [model, setModel]       = useState("deepseek-ai/DeepSeek-V3");
+  const [model, setModel]       = useState(() => PROVIDERS[currentProvider()].defaultModel);
   const [autoMem, setAutoMem]   = useState(true);
   const [useRag, setUseRag]     = useState(false);
   const [useFallbacks, setUseFallbacks] = useState(false);
@@ -23,7 +23,7 @@ export default function SettingsPage() {
   const cfg = PROVIDERS[provider];
   const providerModels = savedModels
     .map((m, index) => ({ ...m, index }))
-    .filter(m => (m.provider || "huggingface") === provider);
+    .filter(m => m.provider === provider);
 
   // Test chat
   const [testMessages, setTestMessages] = useState([]);
@@ -33,7 +33,7 @@ export default function SettingsPage() {
   const testBottomRef = useRef(null);
 
   useEffect(() => {
-    const p = localStorage.getItem("llm_provider") || "huggingface";
+    const p = currentProvider();
     setProvider(p);
     setToken(localStorage.getItem(tokenKey(p)) || "");
     setModel(localStorage.getItem(modelKey(p)) || defaultModel(p));
@@ -212,7 +212,7 @@ export default function SettingsPage() {
       <div className="settings-item">
         <div>
           <div className="settings-label">Embed Memory for Retrieval</div>
-          <div className="settings-sub">Saves each memory update so old details can be recalled in very long chats</div>
+          <div className="settings-sub">Saves each memory update so old details can be recalled in very long chats (uses your Gemini key)</div>
         </div>
         <label className="toggle">
           <input type="checkbox" checked={useRag} onChange={e => {

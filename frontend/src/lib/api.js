@@ -1,12 +1,13 @@
 const BASE = process.env.REACT_APP_API_URL || "http://localhost:8000";
 
 export const PROVIDERS = {
-  huggingface: {
-    label: "Hugging Face",
-    tokenKey: "hf_token", modelKey: "hf_model", defaultModel: "deepseek-ai/DeepSeek-V3",
-    tokenLabel: "Hugging Face Token", tokenPlaceholder: "hf_…",
-    modelHint: "Full model string", modelExample: "deepseek-ai/DeepSeek-V4-Pro:novita",
-  },
+  // Hugging Face is disabled: free accounts no longer get Inference Providers credits.
+  // huggingface: {
+  //   label: "Hugging Face",
+  //   tokenKey: "hf_token", modelKey: "hf_model", defaultModel: "deepseek-ai/DeepSeek-V3",
+  //   tokenLabel: "Hugging Face Token", tokenPlaceholder: "hf_…",
+  //   modelHint: "Full model string", modelExample: "deepseek-ai/DeepSeek-V4-Pro:novita",
+  // },
   openrouter: {
     label: "OpenRouter",
     tokenKey: "openrouter_token", modelKey: "openrouter_model", defaultModel: "",
@@ -45,6 +46,13 @@ export const PROVIDERS = {
   },
 };
 
+const DEFAULT_PROVIDER = "gemini";
+
+export function currentProvider() {
+  const stored = localStorage.getItem("llm_provider");
+  return PROVIDERS[stored] ? stored : DEFAULT_PROVIDER;
+}
+
 const SYNCED_NAMES = [
   ...Object.values(PROVIDERS).flatMap(p => [p.tokenKey, p.modelKey]),
   "llm_provider", "saved_models", "use_fallbacks",
@@ -80,23 +88,22 @@ function fallbackModels(provider, model) {
   if (localStorage.getItem("use_fallbacks") !== "true") return [];
   const saved = JSON.parse(localStorage.getItem("saved_models") || "[]");
   return saved
-    .map(m => ({ provider: m.provider || "huggingface", model: m.model }))
-    .filter(m => !(m.provider === provider && m.model === model))
-    .map(m => ({ ...m, token: localStorage.getItem(PROVIDERS[m.provider].tokenKey) || "" }))
+    .filter(m => PROVIDERS[m.provider] && !(m.provider === provider && m.model === model))
+    .map(m => ({ provider: m.provider, model: m.model, token: localStorage.getItem(PROVIDERS[m.provider].tokenKey) || "" }))
     .filter(m => m.token);
 }
 
 function getHeaders() {
-  const provider = localStorage.getItem("llm_provider") || "huggingface";
+  const provider = currentProvider();
   const cfg = PROVIDERS[provider];
   const token = localStorage.getItem(cfg.tokenKey) || "";
   const model = localStorage.getItem(cfg.modelKey) || cfg.defaultModel;
   const useRag = localStorage.getItem("use_rag") === "true";
   const authToken = localStorage.getItem("auth_token") || "";
-  // RAG embeddings always go through HF's Inference API regardless of which
-  // provider is selected for chat, so this is the raw HF token, not the
+  // RAG embeddings always go through Gemini regardless of which provider is
+  // selected for chat, so this is the raw Gemini key, not the
   // provider-conditional one above.
-  const embedToken = localStorage.getItem("hf_token") || "";
+  const embedToken = localStorage.getItem("gemini_token") || "";
   return {
     "Content-Type": "application/json",
     "x-hf-token": token,
