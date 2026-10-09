@@ -22,7 +22,12 @@ OPENAI_COMPAT_BASE_URLS = {
     "mistral": "https://api.mistral.ai/v1",
     "groq": "https://api.groq.com/openai/v1",
     "navy": "https://api.navy/v1",
+    "puter": "https://api.puter.com/puterai/openai/v1/",
 }
+# A stalled provider (Puter can hang instead of erroring once its allowance is
+# spent) must fail fast so the fallback chain can take over.
+LLM_TIMEOUT = 60
+LLM_MAX_RETRIES = 1
 MAX_CONTEXT   = 20
 MEM_INTERVAL  = 6
 EMBED_MODEL   = "gemini-embedding-001"
@@ -33,8 +38,8 @@ ADMIN_PASSWORD = "admin"
 KEYS_SECRET   = os.environ.get("KEYS_SECRET", "")
 SYNCED_SETTINGS = (
     # "hf_token", "hf_model",
-    "openrouter_token", "nvidia_token", "gemini_token", "mistral_token", "groq_token", "navy_token",
-    "openrouter_model", "nvidia_model", "gemini_model", "mistral_model", "groq_model", "navy_model",
+    "openrouter_token", "nvidia_token", "gemini_token", "mistral_token", "groq_token", "navy_token", "puter_token",
+    "openrouter_model", "nvidia_model", "gemini_model", "mistral_model", "groq_model", "navy_model", "puter_model",
     "llm_provider", "saved_models", "use_fallbacks",
 )
 
@@ -379,7 +384,8 @@ def build_send_history(history: list, memory: str, resume: Optional[dict] = None
 def get_client(provider: str, token: str, model: str):
     """Return (chat client, model id) for the requested provider. Every provider
     in OPENAI_COMPAT_BASE_URLS takes the model id as-is via its OpenAI-compatible API."""
-    return OpenAI(api_key=token, base_url=OPENAI_COMPAT_BASE_URLS[provider]), model
+    return OpenAI(api_key=token, base_url=OPENAI_COMPAT_BASE_URLS[provider],
+                  timeout=LLM_TIMEOUT, max_retries=LLM_MAX_RETRIES), model
     # Hugging Face (disabled: free accounts no longer get Inference Providers credits).
     # "huggingface" expects a "repo_id:provider" model string as copied from HF's model page.
     # if ":" in model:

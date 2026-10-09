@@ -44,6 +44,12 @@ export const PROVIDERS = {
     tokenLabel: "NavyAI API Key", tokenPlaceholder: "sk-navy-…",
     modelHint: "Model id from NavyAI's model list", modelExample: "model-id-from-api.navy",
   },
+  puter: {
+    label: "Puter",
+    tokenKey: "puter_token", modelKey: "puter_model", defaultModel: "deepseek/deepseek-v4-flash",
+    tokenLabel: "Puter Auth Token", tokenPlaceholder: "Puter auth token",
+    modelHint: "Model id from Puter's model list", modelExample: "deepseek/deepseek-v4-flash",
+  },
 };
 
 const DEFAULT_PROVIDER = "gemini";
