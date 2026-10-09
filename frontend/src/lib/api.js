@@ -84,10 +84,30 @@ export async function pullSettings() {
   SYNCED_NAMES.forEach(k => (settings[k] ? localStorage.setItem(k, settings[k]) : localStorage.removeItem(k)));
 }
 
+const PUSH_RETRY_DELAYS_MS = [5000, 15000, 45000];
+const syncListeners = new Set();
 let pushTimer;
+
+export function onSyncFailed(listener) {
+  syncListeners.add(listener);
+  return () => syncListeners.delete(listener);
+}
+
+async function pushSettings(attempt = 0) {
+  try {
+    await api.saveSettings(localSettings());
+    syncListeners.forEach(fn => fn(false));
+  } catch {
+    syncListeners.forEach(fn => fn(true));
+    if (attempt < PUSH_RETRY_DELAYS_MS.length) {
+      pushTimer = setTimeout(() => pushSettings(attempt + 1), PUSH_RETRY_DELAYS_MS[attempt]);
+    }
+  }
+}
+
 export function pushSettingsSoon() {
   clearTimeout(pushTimer);
-  pushTimer = setTimeout(() => api.saveSettings(localSettings()).catch(() => {}), 800);
+  pushTimer = setTimeout(pushSettings, 800);
 }
 
 function fallbackModels(provider, model) {

@@ -1,6 +1,6 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { Eye, EyeOff } from "lucide-react";
-import { PROVIDERS, currentProvider, pushSettingsSoon } from "../lib/api";
+import { PROVIDERS, currentProvider, pushSettingsSoon, onSyncFailed } from "../lib/api";
 
 const tokenKey = p => PROVIDERS[p].tokenKey;
 const modelKey = p => PROVIDERS[p].modelKey;
@@ -18,6 +18,9 @@ export default function ModelSettings() {
   });
   const [newModelStr, setNewModelStr] = useState("");
   const [newModelName, setNewModelName] = useState("");
+  const [syncFailed, setSyncFailed] = useState(false);
+
+  useEffect(() => onSyncFailed(setSyncFailed), []);
 
   const cfg = PROVIDERS[provider];
   const providerModels = savedModels
@@ -104,7 +107,9 @@ export default function ModelSettings() {
           </button>
         </div>
         <div style={{ fontSize: 12, color: "var(--text3)", marginTop: 6 }}>
-          Stored locally in your browser only.
+          {syncFailed
+            ? "Saved on this device, but syncing to your account failed. Retrying…"
+            : "Saved on this device and synced to your account (encrypted)."}
         </div>
       </div>
 
