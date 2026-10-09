@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { Eye, EyeOff } from "lucide-react";
-import { PROVIDERS, currentProvider, pushSettingsSoon, onSyncFailed } from "../lib/api";
+import { PROVIDERS, currentProvider, pushSettingsSoon, onSyncFailed, onSettingsPulled } from "../lib/api";
 
 const tokenKey = p => PROVIDERS[p].tokenKey;
 const modelKey = p => PROVIDERS[p].modelKey;
@@ -8,19 +8,37 @@ const defaultModel = p => PROVIDERS[p].defaultModel;
 
 function save(key, val) { localStorage.setItem(key, String(val)); pushSettingsSoon(); }
 
+function readState() {
+  const provider = currentProvider();
+  let savedModels = [];
+  try { savedModels = JSON.parse(localStorage.getItem("saved_models") || "[]"); } catch {}
+  return {
+    provider,
+    token: localStorage.getItem(tokenKey(provider)) || "",
+    model: localStorage.getItem(modelKey(provider)) || defaultModel(provider),
+    savedModels,
+  };
+}
+
 export default function ModelSettings() {
-  const [provider, setProvider] = useState(currentProvider);
-  const [token, setToken]       = useState(() => localStorage.getItem(tokenKey(currentProvider())) || "");
+  const [provider, setProvider] = useState(() => readState().provider);
+  const [token, setToken]       = useState(() => readState().token);
   const [showToken, setShowToken] = useState(false);
-  const [model, setModel]       = useState(() => localStorage.getItem(modelKey(currentProvider())) || defaultModel(currentProvider()));
-  const [savedModels, setSavedModels] = useState(() => {
-    try { return JSON.parse(localStorage.getItem("saved_models") || "[]"); } catch { return []; }
-  });
+  const [model, setModel]       = useState(() => readState().model);
+  const [savedModels, setSavedModels] = useState(() => readState().savedModels);
   const [newModelStr, setNewModelStr] = useState("");
   const [newModelName, setNewModelName] = useState("");
   const [syncFailed, setSyncFailed] = useState(false);
 
   useEffect(() => onSyncFailed(setSyncFailed), []);
+
+  useEffect(() => onSettingsPulled(() => {
+    const fresh = readState();
+    setProvider(fresh.provider);
+    setToken(fresh.token);
+    setModel(fresh.model);
+    setSavedModels(fresh.savedModels);
+  }), []);
 
   const cfg = PROVIDERS[provider];
   const providerModels = savedModels

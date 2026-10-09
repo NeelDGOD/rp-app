@@ -1,10 +1,14 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import BottomSheet from "./BottomSheet";
 import ModelSettings from "./ModelSettings";
-import { PROVIDERS, currentProvider } from "../lib/api";
+import { PROVIDERS, currentProvider, onSettingsPulled } from "../lib/api";
 
 export default function ModelPickerButton() {
   const [open, setOpen] = useState(false);
+  const [, refresh] = useState(0);
+
+  useEffect(() => onSettingsPulled(() => refresh(n => n + 1)), []);
+
   const provider = currentProvider();
   const model = localStorage.getItem(PROVIDERS[provider].modelKey) || PROVIDERS[provider].defaultModel;
 

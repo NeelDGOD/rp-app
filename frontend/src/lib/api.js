@@ -72,41 +72,72 @@ function localSettings() {
   return Object.fromEntries(SYNCED_NAMES.map(k => [k, localStorage.getItem(k) || ""]).filter(([, v]) => v));
 }
 
-// The server copy is authoritative so a cleared setting stays cleared on every
-// device; the one exception is an account with nothing stored yet, which adopts
-// this device's settings instead of wiping them.
-export async function pullSettings() {
-  const { settings } = await api.getSettings();
-  if (Object.keys(settings).length === 0) {
-    if (Object.keys(localSettings()).length) await api.saveSettings(localSettings());
-    return;
-  }
-  SYNCED_NAMES.forEach(k => (settings[k] ? localStorage.setItem(k, settings[k]) : localStorage.removeItem(k)));
-}
-
-const PUSH_RETRY_DELAYS_MS = [5000, 15000, 45000];
+// Waits long enough to ride out a cold start of the free-tier backend.
+const SYNC_RETRY_DELAYS_MS = [5000, 15000, 45000];
 const syncListeners = new Set();
+const pulledListeners = new Set();
 let pushTimer;
+let pushPending = false;
+let pullInFlight = null;
 
 export function onSyncFailed(listener) {
   syncListeners.add(listener);
   return () => syncListeners.delete(listener);
 }
 
+export function onSettingsPulled(listener) {
+  pulledListeners.add(listener);
+  return () => pulledListeners.delete(listener);
+}
+
+// The server copy is authoritative so a cleared setting stays cleared on every
+// device; the one exception is an account with nothing stored yet, which adopts
+// this device's settings instead of wiping them. Skipped while a local edit is
+// still waiting to be uploaded, so a slow download can't overwrite what was just typed.
+export async function pullSettings() {
+  if (pushPending) return;
+  const { settings } = await api.getSettings();
+  if (pushPending) return;
+  if (Object.keys(settings).length === 0) {
+    if (Object.keys(localSettings()).length) await api.saveSettings(localSettings());
+    return;
+  }
+  SYNCED_NAMES.forEach(k => (settings[k] ? localStorage.setItem(k, settings[k]) : localStorage.removeItem(k)));
+  pulledListeners.forEach(fn => fn());
+}
+
+export function pullSettingsPersistently() {
+  pullInFlight ??= (async () => {
+    try {
+      for (let attempt = 0; ; attempt++) {
+        try { return await pullSettings(); } catch (err) {
+          if (attempt >= SYNC_RETRY_DELAYS_MS.length) throw err;
+          await new Promise(r => setTimeout(r, SYNC_RETRY_DELAYS_MS[attempt]));
+        }
+      }
+    } finally { pullInFlight = null; }
+  })();
+  return pullInFlight;
+}
+
 async function pushSettings(attempt = 0) {
   try {
     await api.saveSettings(localSettings());
+    pushPending = false;
     syncListeners.forEach(fn => fn(false));
   } catch {
     syncListeners.forEach(fn => fn(true));
-    if (attempt < PUSH_RETRY_DELAYS_MS.length) {
-      pushTimer = setTimeout(() => pushSettings(attempt + 1), PUSH_RETRY_DELAYS_MS[attempt]);
+    if (attempt < SYNC_RETRY_DELAYS_MS.length) {
+      pushTimer = setTimeout(() => pushSettings(attempt + 1), SYNC_RETRY_DELAYS_MS[attempt]);
+    } else {
+      pushPending = false;
     }
   }
 }
 
 export function pushSettingsSoon() {
   clearTimeout(pushTimer);
+  pushPending = true;
   pushTimer = setTimeout(pushSettings, 800);
 }
 

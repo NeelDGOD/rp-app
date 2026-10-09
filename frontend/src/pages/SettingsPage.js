@@ -27,7 +27,8 @@ export default function SettingsPage() {
   }, []);
 
   useEffect(() => {
-    testBottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (testMessages.length === 0 && !testStreamText) return;
+    testBottomRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
   }, [testMessages, testStreamText]);
 
   async function loadErrorLog() {

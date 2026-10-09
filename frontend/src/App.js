@@ -8,7 +8,7 @@ import LoginPage from "./pages/LoginPage";
 import AIChatsPage from "./pages/AIChatsPage";
 import AIChatPage from "./pages/AIChatPage";
 import BottomNav from "./components/BottomNav";
-import { pullSettings } from "./lib/api";
+import { pullSettingsPersistently } from "./lib/api";
 import "./index.css";
 
 function RequireAuth({ children }) {
@@ -18,7 +18,13 @@ function RequireAuth({ children }) {
 
 export default function App() {
   useEffect(() => {
-    if (localStorage.getItem("auth_token")) pullSettings().catch(() => {});
+    const pull = () => {
+      if (localStorage.getItem("auth_token")) pullSettingsPersistently().catch(() => {});
+    };
+    const onVisible = () => { if (document.visibilityState === "visible") pull(); };
+    pull();
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
   }, []);
 
   return (
