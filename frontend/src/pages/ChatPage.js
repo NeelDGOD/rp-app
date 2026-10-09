@@ -186,11 +186,19 @@ export default function ChatPage() {
   }
 
   // ── UNDO ──
+  // Keep the list of all branches in step with edits made to the one on screen, so version
+  // counters never count a turn that was just undone or rewritten.
+  function replaceActiveHistory(history) {
+    const id = activeBranch.id;
+    setActiveBranch(b => ({ ...b, history }));
+    setAllBranches(list => list.map(b => (b.id === id ? { ...b, history } : b)));
+  }
+
   async function doUndo() {
     if (streaming || !activeBranch) return;
     try {
       const res = await api.undo(activeBranch.id);
-      setActiveBranch(b => ({ ...b, history: res.history }));
+      replaceActiveHistory(res.history);
       toast("Last turn removed", "info", 2000);
     } catch (e) { toast(e.message, "error"); }
   }
@@ -200,7 +208,7 @@ export default function ChatPage() {
     if (!activeBranch) return;
     try {
       const res = await api.editMessage(activeBranch.id, visibleIndex, newContent);
-      setActiveBranch(b => ({ ...b, history: res.history }));
+      replaceActiveHistory(res.history);
       setEditingMsg(null);
       toast("Reply updated", "success", 2000);
     } catch (e) { toast(e.message, "error"); }
