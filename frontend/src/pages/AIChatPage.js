@@ -4,6 +4,7 @@ import { ChevronLeft, Send, Paperclip, X } from "lucide-react";
 import { api } from "../lib/api";
 import { useSlowLoad } from "../lib/useSlowLoad";
 import { useToast } from "../components/Toast";
+import ModelPickerButton from "../components/ModelPickerButton";
 
 const MAX_IMAGE_DIM = 1280;
 const IMAGE_QUALITY = 0.85;
@@ -168,6 +169,9 @@ export default function AIChatPage() {
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontSize: 17, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
             {chat.name}
+          </div>
+          <div style={{ fontSize: 11, fontFamily: "var(--mono)", color: "var(--text3)", marginTop: 1 }}>
+            <ModelPickerButton />
           </div>
         </div>
       </div>

@@ -11,6 +11,7 @@ import { api } from "../lib/api";
 import { useSlowLoad } from "../lib/useSlowLoad";
 import BottomSheet from "../components/BottomSheet";
 import { useToast } from "../components/Toast";
+import ModelPickerButton from "../components/ModelPickerButton";
 
 const COMMANDS_REF = `GENERAL
   retry              re-generate last reply
@@ -387,7 +388,8 @@ export default function ChatPage() {
             {chat.name}
           </div>
           <div style={{ fontSize: 11, fontFamily: "var(--mono)", color: "var(--text3)", marginTop: 1 }}>
-            {allBranches.length > 1 ? `${allBranches.length} branches` : ""}
+            <ModelPickerButton />
+            {allBranches.length > 1 ? ` · ${allBranches.length} branches` : ""}
           </div>
         </div>
         <button className="btn-icon" onClick={() => setSheet("search")}><Search size={18} /></button>
