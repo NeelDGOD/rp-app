@@ -1,5 +1,5 @@
 import os, re, json, uuid, secrets, asyncio, threading, time, base64, hashlib
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import Optional
 from fastapi import FastAPI, HTTPException, Header, Depends
@@ -37,6 +37,7 @@ RAG_TOP_K     = 3
 ADMIN_EMAIL   = "admin@chat.com"
 ADMIN_PASSWORD = "admin"
 KEYS_SECRET   = os.environ.get("KEYS_SECRET", "")
+LOG_RETENTION_DAYS = 14
 SYNCED_SETTINGS = (
     # "hf_token", "hf_model",
     "openrouter_token", "nvidia_token", "gemini_token", "mistral_token", "groq_token", "navy_token", "puter_token",
@@ -93,6 +94,7 @@ TABLE_COLS = {
     "memory_chunks": ["id", "branch_id", "content", "embedding", "created_at"],
     "ai_chats": ["id", "name", "history", "created_at", "updated_at", "user_id"],
     "user_settings": ["user_id", "data"],
+    "api_errors": ["id", "user_id", "created_at", "kind", "provider", "model", "message", "fell_back"],
 }
 
 def rows(conn, sql, params=(), cols=None):
@@ -166,6 +168,12 @@ def init_db():
         CREATE TABLE IF NOT EXISTS user_settings (
             user_id TEXT PRIMARY KEY, data TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS api_errors (
+            id TEXT PRIMARY KEY, user_id TEXT NOT NULL, created_at TEXT NOT NULL,
+            kind TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL,
+            message TEXT NOT NULL, fell_back INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_api_errors_user ON api_errors(user_id, created_at);
     """)
     conn.commit()
     conn.close()
@@ -291,6 +299,19 @@ def put_settings(data: SettingsPayload, user_id: str = Depends(require_user)):
     conn = get_db()
     q(conn, "INSERT OR REPLACE INTO user_settings VALUES (?,?)", (user_id, cipher.encrypt(json.dumps(settings).encode()).decode()))
     conn.commit(); conn.close()
+    return {"ok": True}
+
+# ── ERROR LOG ─────────────────────────────────────────────────────────────────
+@app.get("/logs")
+def get_logs(user_id: str = Depends(require_user)):
+    conn = get_db()
+    r = rows(conn, "SELECT * FROM api_errors WHERE user_id=? ORDER BY created_at DESC LIMIT 100", (user_id,), cols=TABLE_COLS["api_errors"])
+    conn.close()
+    return [{k: v for k, v in e.items() if k != "user_id"} for e in r]
+
+@app.delete("/logs")
+def clear_logs(user_id: str = Depends(require_user)):
+    db_write("DELETE FROM api_errors WHERE user_id=?", (user_id,))
     return {"ok": True}
 
 # ── MODELS ────────────────────────────────────────────────────────────────────
@@ -443,13 +464,30 @@ def llm_candidates(x_hf_token: str = Header(...), x_model: str = Header(default=
     """The selected (provider, token, model) followed by the user's fallbacks, in order."""
     return [(x_provider, x_hf_token, x_model)] + [(f["provider"], f["token"], f["model"]) for f in json.loads(x_fallbacks)]
 
-def complete(llm: list, messages: list) -> str:
+def log_api_error(user_id: str, kind: str, provider: str, model: str, error: Exception,
+                  secret: str = "", fell_back: bool = False):
+    """Record a failed provider call in the database. Logging must never break the
+    request it describes, so any failure here is swallowed."""
+    message = str(error)
+    if secret.strip():
+        message = message.replace(secret.strip(), "[key]")
+    cutoff = (datetime.utcnow() - timedelta(days=LOG_RETENTION_DAYS)).isoformat()
+    try:
+        db_write("INSERT INTO api_errors VALUES (?,?,?,?,?,?,?,?)",
+                 (str(uuid.uuid4()), user_id, ts(), kind, provider, model, message[:500], int(fell_back)))
+        db_write("DELETE FROM api_errors WHERE created_at < ?", (cutoff,))
+    except Exception:
+        pass
+
+def complete(llm: list, messages: list, user_id: str) -> str:
     for i, (provider, token, model) in enumerate(llm):
         client, model_id = get_client(provider, token, model)
         try:
             return client.chat.completions.create(model=model_id, messages=messages).choices[0].message.content
-        except Exception:
-            if i == len(llm) - 1:
+        except Exception as e:
+            last = i == len(llm) - 1
+            log_api_error(user_id, "memory", provider, model, e, token, fell_back=not last)
+            if last:
                 raise
 
 # Provider SDKs iterate the stream synchronously (blocking network I/O per chunk).
@@ -473,7 +511,7 @@ class LLMStream:
     def __aiter__(self):
         return self.gen
 
-def stream_chat(llm: list, messages: list):
+def stream_chat(llm: list, messages: list, user_id: str):
     result = LLMStream()
     queue: asyncio.Queue = asyncio.Queue()
     loop = asyncio.get_event_loop()
@@ -491,10 +529,12 @@ def stream_chat(llm: list, messages: list):
                             result.model = f"{provider} / {model}"
                         loop.call_soon_threadsafe(queue.put_nowait, chunk)
                     return
-                except Exception:
+                except Exception as e:
                     # Once text has reached the user, switching models would splice
                     # two different replies together, so only fall back before that.
-                    if started or i == len(llm) - 1:
+                    last = i == len(llm) - 1
+                    log_api_error(user_id, "chat", provider, model, e, token, fell_back=not (started or last))
+                    if started or last:
                         raise
         except Exception as e:
             loop.call_soon_threadsafe(queue.put_nowait, e)
@@ -523,7 +563,7 @@ def stream_chat(llm: list, messages: list):
     result.gen = gen()
     return result
 
-def do_memory_update(history: list, current_memory: str, llm: list, director_note: str = "") -> tuple:
+def do_memory_update(history: list, current_memory: str, llm: list, user_id: str, director_note: str = "") -> tuple:
     text = "\n".join(
         f"{'User' if m['role']=='user' else 'Bot'}: {m['content']}"
         for m in history[-20:] if m["role"] in ("user", "assistant")
@@ -552,7 +592,7 @@ CURRENT SCENE:
 EMOTIONAL STATE:{directive_block}"""},
         {"role": "user", "content": f"EXISTING MEMORY:\n{current_memory or '(none yet)'}\n\nNEW CONVERSATION:\n{text}\n\nReturn the fully updated memory document."}
     ]
-    raw = complete(llm, prompt)
+    raw = complete(llm, prompt, user_id)
 
     new_note = director_note
     m = re.search(r"DIRECTOR_NOTE:\s*(KEEP|DROP)", raw, re.IGNORECASE)
@@ -800,8 +840,8 @@ async def send_message(chat_id: str, data: SendMsg,
             relevant = retrieve_relevant_chunks(data.branch_id, cleaned, x_embed_token)
             if relevant:
                 send_hist.append({"role": "system", "content": "RELEVANT PAST MEMORY:\n" + "\n---\n".join(relevant)})
-        except Exception:
-            pass
+        except Exception as e:
+            log_api_error(user_id, "embedding", "gemini", EMBED_MODEL, e, x_embed_token)
 
     if b["director_note"]:
         send_hist.append({"role": "system", "content": f"ONGOING DIRECTOR NOTE (stays in effect until the user changes or clears it): {b['director_note']}"})
@@ -817,7 +857,7 @@ async def send_message(chat_id: str, data: SendMsg,
     async def stream():
         full = ""
         try:
-            reply = stream_chat(llm, send_hist)
+            reply = stream_chat(llm, send_hist, user_id)
             async for chunk in reply:
                 if chunk is KEEPALIVE:
                     yield ": keepalive\n\n"
@@ -858,7 +898,7 @@ async def retry_message(chat_id: str, data: RetryMsg,
     async def stream():
         full = ""
         try:
-            reply = stream_chat(llm, send_hist)
+            reply = stream_chat(llm, send_hist, user_id)
             async for chunk in reply:
                 if chunk is KEEPALIVE:
                     yield ": keepalive\n\n"
@@ -906,15 +946,15 @@ def update_memory(branch_id: str, llm: list = Depends(llm_candidates),
     branch_owned(branch_id, user_id)
     b = get_branch_data(branch_id)
     try:
-        new_mem, new_note = do_memory_update(b["history"], b["memory"], llm, b["director_note"])
+        new_mem, new_note = do_memory_update(b["history"], b["memory"], llm, user_id, b["director_note"])
         save_branch(branch_id, b["history"], new_mem, b["turn_counter"], new_note)
         if x_use_rag.lower() == "true" and x_embed_token:
             # The memory document above is already saved — a broken/unauthorized
             # embed token must not turn this into a reported failure.
             try:
                 store_memory_chunk(branch_id, new_mem, x_embed_token)
-            except Exception:
-                pass
+            except Exception as e:
+                log_api_error(user_id, "embedding", "gemini", EMBED_MODEL, e, x_embed_token)
         return {"ok": True, "memory": new_mem, "director_note": new_note}
     except Exception as e:
         raise HTTPException(500, str(e))
@@ -1006,7 +1046,7 @@ async def edit_user_message(chat_id: str, data: EditUserMsg,
     async def stream():
         full = ""
         try:
-            reply = stream_chat(llm, send_hist)
+            reply = stream_chat(llm, send_hist, user_id)
             async for chunk in reply:
                 if chunk is KEEPALIVE:
                     yield ": keepalive\n\n"
@@ -1043,7 +1083,7 @@ async def test_chat(data: TestMsg,
                     user_id: str = Depends(require_user)):
     async def stream():
         try:
-            async for chunk in stream_chat(llm, data.messages):
+            async for chunk in stream_chat(llm, data.messages, user_id):
                 if chunk is KEEPALIVE:
                     yield ": keepalive\n\n"
                     continue
@@ -1109,7 +1149,7 @@ async def send_ai_message(chat_id: str, data: AIChatSendMsg,
     async def stream():
         full = ""
         try:
-            async for chunk in stream_chat(llm, send_hist):
+            async for chunk in stream_chat(llm, send_hist, user_id):
                 if chunk is KEEPALIVE:
                     yield ": keepalive\n\n"
                     continue

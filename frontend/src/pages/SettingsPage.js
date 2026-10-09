@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { Eye, EyeOff, Send, Trash2, LogOut } from "lucide-react";
+import { Eye, EyeOff, Send, Trash2, LogOut, RefreshCw } from "lucide-react";
 import { api, PROVIDERS, clearSession, pushSettingsSoon, currentProvider } from "../lib/api";
 
 export default function SettingsPage() {
@@ -12,6 +12,7 @@ export default function SettingsPage() {
   const [autoMem, setAutoMem]   = useState(true);
   const [useRag, setUseRag]     = useState(false);
   const [useFallbacks, setUseFallbacks] = useState(false);
+  const [errorLog, setErrorLog] = useState(null);
   const [fontSize, setFontSize] = useState(17);
   const [savedModels, setSavedModels] = useState([]);
   const [newModelStr, setNewModelStr] = useState("");
@@ -50,6 +51,15 @@ export default function SettingsPage() {
   useEffect(() => {
     testBottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [testMessages, testStreamText]);
+
+  async function loadErrorLog() {
+    try { setErrorLog(await api.getLogs()); } catch { setErrorLog([]); }
+  }
+
+  async function clearErrorLog() {
+    await api.clearLogs();
+    setErrorLog([]);
+  }
 
   function save(key, val) { localStorage.setItem(key, String(val)); pushSettingsSoon(); }
 
@@ -427,6 +437,58 @@ export default function SettingsPage() {
             <Send size={16} />
           </button>
         </div>
+      </div>
+
+      <div style={{ height: 1, background: "var(--border)", margin: "8px 0 0" }} />
+
+      {/* ── ERROR LOG ── */}
+      <div style={{ padding: "16px" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+          <div>
+            <div style={{ fontSize: 12, fontFamily: "var(--mono)", color: "var(--text3)", letterSpacing: "0.5px", textTransform: "uppercase" }}>
+              Error Log
+            </div>
+            <div style={{ fontSize: 12, color: "var(--text3)", marginTop: 3 }}>
+              Failed model calls from the last 14 days
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 4 }}>
+            <button className="btn-icon" style={{ color: "var(--text3)" }} onClick={loadErrorLog}>
+              <RefreshCw size={16} />
+            </button>
+            {errorLog?.length > 0 && (
+              <button className="btn-icon" style={{ color: "var(--text3)" }} onClick={clearErrorLog}>
+                <Trash2 size={16} />
+              </button>
+            )}
+          </div>
+        </div>
+
+        {errorLog === null ? (
+          <button className="btn btn-ghost btn-sm" onClick={loadErrorLog}>Show errors</button>
+        ) : errorLog.length === 0 ? (
+          <div style={{ fontSize: 13, color: "var(--text3)" }}>No errors logged.</div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 360, overflowY: "auto" }}>
+            {errorLog.map(e => (
+              <div key={e.id} style={{
+                padding: "10px 12px", borderRadius: "var(--radius-sm)",
+                background: "var(--bg3)", border: "1px solid var(--border)",
+              }}>
+                <div style={{ fontSize: 12, fontFamily: "var(--mono)", color: "var(--text2)" }}>
+                  {e.kind} · {e.provider} / {e.model}
+                  {e.fell_back ? <span style={{ color: "var(--accent)", marginLeft: 8 }}>fell back</span> : null}
+                </div>
+                <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 2 }}>
+                  {new Date(e.created_at + "Z").toLocaleString()}
+                </div>
+                <div style={{ fontSize: 12, fontFamily: "var(--mono)", color: "var(--error)", marginTop: 6, wordBreak: "break-word" }}>
+                  {e.message}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div style={{ height: 32 }} />
