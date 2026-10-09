@@ -72,8 +72,9 @@ function localSettings() {
   return Object.fromEntries(SYNCED_NAMES.map(k => [k, localStorage.getItem(k) || ""]).filter(([, v]) => v));
 }
 
-// Waits long enough to ride out a cold start of the free-tier backend.
-const SYNC_RETRY_DELAYS_MS = [5000, 15000, 45000];
+// The free-tier backend takes 30-60s to wake up, so poll often at first: the first
+// attempt that lands after it is up succeeds within seconds instead of waiting out a long gap.
+const SYNC_RETRY_DELAYS_MS = [2000, 2000, 3000, 3000, 5000, 5000, 10000, 10000, 15000];
 const syncListeners = new Set();
 const pulledListeners = new Set();
 let pushTimer;

@@ -309,6 +309,10 @@ def put_settings(data: SettingsPayload, user_id: str = Depends(require_user)):
     conn.commit(); conn.close()
     return {"ok": True}
 
+@app.get("/health")
+def health():
+    return {"ok": True}
+
 # ── ERROR LOG ─────────────────────────────────────────────────────────────────
 @app.get("/logs")
 def get_logs(user_id: str = Depends(require_user)):
