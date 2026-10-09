@@ -1,5 +1,6 @@
 import os, re, json, uuid, secrets, asyncio, threading, time, base64, hashlib
 from datetime import datetime
+from types import SimpleNamespace
 from typing import Optional
 from fastapi import FastAPI, HTTPException, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,8 +23,8 @@ OPENAI_COMPAT_BASE_URLS = {
     "mistral": "https://api.mistral.ai/v1",
     "groq": "https://api.groq.com/openai/v1",
     "navy": "https://api.navy/v1",
-    "puter": "https://api.puter.com/puterai/openai/v1/",
 }
+PUTER_URL = "https://api.puter.com/drivers/call"
 # A stalled provider (Puter can hang instead of erroring once its allowance is
 # spent) must fail fast so the fallback chain can take over.
 LLM_TIMEOUT = 60
@@ -381,9 +382,50 @@ def build_send_history(history: list, memory: str, resume: Optional[dict] = None
         send.insert(i, resume)
     return send
 
+class PuterClient:
+    """Exposes the slice of the OpenAI client the app uses (chat.completions.create)
+    over Puter's driver endpoint. Puter's OpenAI-compatible address demands a paid
+    subscription, while the route Puter.js itself uses accepts the same free token."""
+    def __init__(self, token: str):
+        self._token = token
+        self.chat = SimpleNamespace(completions=self)
+
+    def create(self, model: str, messages: list, stream: bool = False):
+        body = json.dumps({"interface": "puter-chat-completion", "driver": "ai-chat", "test_mode": False,
+                           "method": "complete", "args": {"messages": messages, "model": model, "stream": stream},
+                           "auth_token": self._token})
+        headers = {"Content-Type": "text/plain;actually=json"}
+        if stream:
+            return self._stream(body, headers)
+        r = httpx.post(PUTER_URL, content=body, headers=headers, timeout=LLM_TIMEOUT)
+        self._check(r)
+        content = r.json()["result"]["message"]["content"]
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
+
+    def _stream(self, body: str, headers: dict):
+        with httpx.stream("POST", PUTER_URL, content=body, headers=headers, timeout=LLM_TIMEOUT) as r:
+            if r.status_code != 200:
+                r.read()
+                self._check(r)
+            for line in r.iter_lines():
+                part = json.loads(line) if line else {}
+                if part.get("type") == "text":
+                    yield SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=part["text"]))])
+
+    @staticmethod
+    def _check(r):
+        if r.status_code != 200:
+            try:
+                message = r.json()["message"]
+            except Exception:
+                message = r.text[:200]
+            raise RuntimeError(f"Puter error {r.status_code}: {message}")
+
 def get_client(provider: str, token: str, model: str):
     """Return (chat client, model id) for the requested provider. Every provider
     in OPENAI_COMPAT_BASE_URLS takes the model id as-is via its OpenAI-compatible API."""
+    if provider == "puter":
+        return PuterClient(token.strip()), model
     # A pasted key often carries a trailing space/newline, which the HTTP layer
     # rejects and the OpenAI client reports only as a bare "Connection error.".
     return OpenAI(api_key=token.strip(), base_url=OPENAI_COMPAT_BASE_URLS[provider],

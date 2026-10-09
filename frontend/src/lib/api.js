@@ -46,9 +46,9 @@ export const PROVIDERS = {
   },
   puter: {
     label: "Puter",
-    tokenKey: "puter_token", modelKey: "puter_model", defaultModel: "deepseek/deepseek-v4-flash",
+    tokenKey: "puter_token", modelKey: "puter_model", defaultModel: "deepseek/deepseek-v4.1-flash:free",
     tokenLabel: "Puter Auth Token", tokenPlaceholder: "Puter auth token",
-    modelHint: "Model id from Puter's model list", modelExample: "deepseek/deepseek-v4-flash",
+    modelHint: "Model id; the ones ending in :free cost nothing", modelExample: "deepseek/deepseek-v4.1-flash:free",
   },
 };
 
