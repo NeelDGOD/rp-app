@@ -66,7 +66,7 @@ export default function ChatsPage() {
   return (
     <div className="page">
       <PageHeader title="Chats" kicker={!loading && chats.length > 0 ? `${chats.length} ${chats.length === 1 ? "story" : "stories"}` : null}>
-        <button className="btn btn-ghost btn-sm" onClick={openNew}><Plus size={16} /> New chat</button>
+        {(loading || chats.length > 0) && <button className="btn btn-ghost btn-sm" onClick={openNew}><Plus size={16} /> New chat</button>}
       </PageHeader>
 
       <div className="col">

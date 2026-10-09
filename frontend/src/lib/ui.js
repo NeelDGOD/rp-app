@@ -49,6 +49,13 @@ export function useBusy() {
   return [busy, run];
 }
 
+const NETWORK_ERROR = /failed to fetch|networkerror|load failed/i;
+
+// Browsers report an unreachable server with cryptic, browser-specific messages.
+export function friendlyError(message) {
+  return NETWORK_ERROR.test(message) ? "Can't reach the server. Check your connection; it may also still be waking up." : message;
+}
+
 export function scrollBehavior() {
   return window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth";
 }

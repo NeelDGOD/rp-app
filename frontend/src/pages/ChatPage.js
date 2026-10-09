@@ -411,8 +411,8 @@ export default function ChatPage() {
     ...(!autoMem ? [{ label: "Remember", Icon: Brain, onClick: () => triggerMemoryUpdate(), busy: memState === "working" }] : []),
   ];
   const memChip = memState && (
-    <span className={`status-chip${memState === "failed" ? " is-error" : ""}`} role="status">
-      {memState === "working" && <><Spinner size={13} /> Updating memory…</>}
+    <span className={`bar__status${memState === "failed" ? " is-error" : ""}`} role="status">
+      {memState === "working" && <><Spinner size={11} /> Updating memory…</>}
       {memState === "done" && "Memory updated"}
       {memState === "failed" && "Memory update failed"}
     </span>
@@ -429,7 +429,8 @@ export default function ChatPage() {
             <h1 className="bar__name">{chat.name}</h1>
             <div className="bar__sub">
               <ModelPickerButton />
-              {allBranches.length > 1 && <span className="bar__branches">{allBranches.length} branches</span>}
+              {allBranches.length > 1 && !memState && <span className="bar__branches">{allBranches.length} branches</span>}
+              {memChip}
             </div>
           </div>
           <button className="icon-btn" onClick={() => setSheet("search")} aria-label="Search this chat"><Search size={19} /></button>
@@ -505,7 +506,6 @@ export default function ChatPage() {
       <div className="dock">
         <div className="chat-col">
           <div className="toolbar" role="toolbar" aria-label="Story tools">
-            {memChip}
             {tools.map(({ label, Icon, onClick, busy: toolBusy }) => (
               <button key={label} className="chip" onClick={onClick} disabled={streaming || !!busy || toolBusy} aria-busy={toolBusy || undefined}>
                 <BusyIcon busy={toolBusy} Icon={Icon} size={15} /> {label}
@@ -609,7 +609,7 @@ export default function ChatPage() {
 
       {sheet === "search" && (
         <BottomSheet title="Search this chat" onClose={() => { setSheet(null); setSearchQuery(""); }}>
-          <input className="input" placeholder="Search messages…" value={searchQuery}
+          <input className="input search-input" placeholder="Search messages…" value={searchQuery}
             onChange={e => setSearchQuery(e.target.value)} autoFocus />
           <p className="sheet-note mono">
             {searchQuery

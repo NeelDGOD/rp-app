@@ -406,6 +406,8 @@ textarea.input { resize: none; display: block; }
   padding-bottom: calc(12px + var(--safe-b));
   animation: sheet-up .34s var(--ease-out) both;
 }
+/* Search results are shown in the transcript behind the sheet, so keep it readable. */
+.sheet-overlay:has(.search-input) { background: rgba(3,5,6,0.2); }
 .sheet-handle { width: 36px; height: 4px; border-radius: 2px; background: var(--border2); margin: 10px auto 0; }
 .sheet-head { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: 8px; padding: 10px 8px 6px 22px; background: var(--bg2); }
 .sheet-title { flex: 1; min-width: 0; font-family: var(--serif); font-size: 21px; font-weight: 500; line-height: 1.25; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -444,7 +446,7 @@ textarea.input { resize: none; display: block; }
 .bm-item__label { font-family: var(--serif); font-size: 17px; overflow-wrap: anywhere; }
 .bm-item__date { font-family: var(--mono); font-size: 11.5px; color: var(--text3); margin-top: 2px; }
 
-.ref { font-family: var(--mono); font-size: clamp(10.5px, 2.9vw, 13px); color: var(--text2); line-height: 1.85; white-space: pre; overflow-x: auto; padding: 4px 0; }
+.ref { font-family: var(--mono); font-size: clamp(10px, 2.7vw, 13px); color: var(--text2); line-height: 1.85; white-space: pre; overflow-x: auto; padding: 4px 0; }
 
 /* ── TOAST ── */
 .toast-container {
@@ -482,9 +484,9 @@ textarea.input { resize: none; display: block; }
 .spinner { display: inline-block; flex-shrink: 0; border-radius: 50%; border: 2px solid currentColor; border-right-color: transparent; opacity: .85; animation: spin .7s linear infinite; }
 .btn .spinner, .chip .spinner { color: inherit; }
 .chip .spinner { color: var(--accent); }
-.status-chip { display: inline-flex; align-items: center; gap: 7px; flex-shrink: 0; height: 34px; padding: 0 12px; border-radius: 999px; font-family: var(--sans); font-size: 13px; font-weight: 500; color: var(--accent2); background: var(--accent-bg); border: 1px solid var(--accent-line); animation: fade-in .2s ease both; }
-.status-chip.is-error { color: var(--error); background: var(--error-bg); border-color: var(--error-line); }
-.status-chip .spinner { color: var(--accent); }
+.bar__status { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; white-space: nowrap; font-family: var(--mono); font-size: 11.5px; color: var(--accent2); animation: fade-in .2s ease both; }
+.bar__status.is-error { color: var(--error); }
+.bar__status .spinner { color: var(--accent); }
 .waiting { display: flex; align-items: center; gap: 12px; min-height: 1.7em; font-size: var(--prose-size, 17px); }
 .waiting__label { font-family: var(--serif); font-style: italic; font-size: .92em; color: var(--text2); }
 .waiting__secs { font-family: var(--mono); font-size: 12px; color: var(--text3); font-style: normal; margin-left: 4px; }

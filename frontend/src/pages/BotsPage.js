@@ -98,7 +98,7 @@ export default function BotsPage() {
   return (
     <div className="page">
       <PageHeader title="Bots" kicker={!loading && bots.length > 0 ? `${bots.length} ${bots.length === 1 ? "character" : "characters"}` : null}>
-        <button className="btn btn-ghost btn-sm" onClick={openNew}><Plus size={16} /> New character</button>
+        {(loading || bots.length > 0) && <button className="btn btn-ghost btn-sm" onClick={openNew}><Plus size={16} /> New character</button>}
       </PageHeader>
 
       <div className="col">

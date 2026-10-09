@@ -1,5 +1,6 @@
 import React from "react";
 import { CloudOff } from "lucide-react";
+import { friendlyError } from "../lib/ui";
 
 export function PageHeader({ title, kicker, children }) {
   return (
@@ -35,15 +36,13 @@ export function EmptyState({ icon: Icon, title, text, action, tone }) {
   );
 }
 
-const NETWORK_ERROR = /failed to fetch|networkerror|load failed/i;
-
 export function ErrorState({ message, onRetry, busy }) {
   return (
     <EmptyState
       icon={CloudOff}
       tone="error"
       title="Couldn't load this"
-      text={NETWORK_ERROR.test(message) ? "Can't reach the server. Check your connection; it may also still be waking up." : message}
+      text={friendlyError(message)}
       action={onRetry && (
         <button className="btn btn-ghost" onClick={onRetry} disabled={busy}>
           {busy && <Spinner />} Try again

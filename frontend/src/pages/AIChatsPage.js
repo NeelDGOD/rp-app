@@ -50,9 +50,11 @@ export default function AIChatsPage() {
   return (
     <div className="page">
       <PageHeader title="AI" kicker="Plain assistant, no character">
-        <button className="btn btn-ghost btn-sm" onClick={() => runBusy("create", createChat)} disabled={busy === "create"}>
-          <BusyIcon busy={busy === "create"} Icon={Plus} /> New chat
-        </button>
+        {(loading || chats.length > 0) && (
+          <button className="btn btn-ghost btn-sm" onClick={() => runBusy("create", createChat)} disabled={busy === "create"}>
+            <BusyIcon busy={busy === "create"} Icon={Plus} /> New chat
+          </button>
+        )}
       </PageHeader>
 
       <div className="col">
