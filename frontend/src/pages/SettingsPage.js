@@ -1,8 +1,48 @@
 import React, { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { Send, Trash2, LogOut, RefreshCw } from "lucide-react";
+import { BookOpenText, Brain, ChevronDown, KeyRound, LogOut, RefreshCw, Trash2, UserRound, Wrench } from "lucide-react";
 import { api, clearSession, pushSettingsSoon } from "../lib/api";
 import ModelSettings from "../components/ModelSettings";
+import { BusyIcon, PageHeader } from "../components/States";
+import { Composer, Thinking, Turn } from "../components/Transcript";
+import { Prose } from "../lib/format";
+import { useBusy } from "../lib/ui";
+
+const PREVIEW_TEXT = `*She looks away, biting her lip as if weighing whether to say it.* "You came back," she says at last. "I wasn't sure you would."`;
+
+function Section({ id, title, sub, Icon, open, onToggle, children }) {
+  return (
+    <section className={`acc${open ? " is-open" : ""}`}>
+      <button className="acc-head" aria-expanded={open} aria-controls={`acc-${id}`} onClick={onToggle}>
+        <span className="acc-icon"><Icon size={17} strokeWidth={1.8} /></span>
+        <span className="acc-titles">
+          <span className="acc-title">{title}</span>
+          <span className="acc-sub">{sub}</span>
+        </span>
+        <ChevronDown size={18} className="acc-chev" />
+      </button>
+      <div className="acc-panel" id={`acc-${id}`}>
+        <div className="acc-inner"><div className="acc-body">{children}</div></div>
+      </div>
+    </section>
+  );
+}
+
+function ToggleSetting({ label, sub, checked, onChange }) {
+  return (
+    <div className="setting">
+      <div>
+        <div className="setting__label">{label}</div>
+        <div className="setting__sub">{sub}</div>
+      </div>
+      <label className="toggle">
+        <input type="checkbox" checked={checked} aria-label={label} onChange={e => onChange(e.target.checked)} />
+        <div className="toggle-track" />
+        <div className="toggle-thumb" />
+      </label>
+    </div>
+  );
+}
 
 export default function SettingsPage() {
   const nav = useNavigate();
@@ -11,13 +51,15 @@ export default function SettingsPage() {
   const [useFallbacks, setUseFallbacks] = useState(false);
   const [errorLog, setErrorLog] = useState(null);
   const [fontSize, setFontSize] = useState(17);
+  const [openSections, setOpenSections] = useState(["model"]);
+  const [busy, runBusy] = useBusy();
 
   // Test chat
   const [testMessages, setTestMessages] = useState([]);
   const [testInput, setTestInput]       = useState("");
   const [testStreaming, setTestStreaming] = useState(false);
   const [testStreamText, setTestStreamText] = useState("");
-  const testBottomRef = useRef(null);
+  const testScrollRef = useRef(null);
 
   useEffect(() => {
     setAutoMem(localStorage.getItem("auto_memory") !== "false");
@@ -26,9 +68,11 @@ export default function SettingsPage() {
     setFontSize(parseInt(localStorage.getItem("font_size") || "17"));
   }, []);
 
+  // Scrolls only the test box itself, never the page.
   useEffect(() => {
-    if (testMessages.length === 0 && !testStreamText) return;
-    testBottomRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    const el = testScrollRef.current;
+    if (!el || (testMessages.length === 0 && !testStreamText)) return;
+    el.scrollTop = el.scrollHeight;
   }, [testMessages, testStreamText]);
 
   async function loadErrorLog() {
@@ -73,247 +117,158 @@ export default function SettingsPage() {
     );
   }
 
+  const section = id => ({
+    id,
+    open: openSections.includes(id),
+    onToggle: () => setOpenSections(s => (s.includes(id) ? s.filter(x => x !== id) : [...s, id])),
+  });
+
   return (
     <div className="page">
-      <div className="page-header">
-        <span className="page-title">Settings</span>
-      </div>
+      <PageHeader title="Settings" />
 
-      <ModelSettings />
+      <div className="col">
+        <Section {...section("model")} title="Model & API key" sub="Provider, key and the model that writes replies" Icon={KeyRound}>
+          <ModelSettings />
+        </Section>
 
-      <div style={{ height: 1, background: "var(--border)", margin: "20px 0" }} />
-
-      {/* ── AUTO MEMORY ── */}
-      <div className="settings-item">
-        <div>
-          <div className="settings-label">Auto Memory Update</div>
-          <div className="settings-sub">Updates memory every 6 turns automatically</div>
-        </div>
-        <label className="toggle">
-          <input type="checkbox" checked={autoMem} onChange={e => {
-            setAutoMem(e.target.checked); save("auto_memory", e.target.checked);
-          }} />
-          <div className="toggle-track" />
-          <div className="toggle-thumb" />
-        </label>
-      </div>
-
-      {/* ── RAG MEMORY ── */}
-      <div className="settings-item">
-        <div>
-          <div className="settings-label">Embed Memory for Retrieval</div>
-          <div className="settings-sub">Saves each memory update so old details can be recalled in very long chats (uses your Gemini key)</div>
-        </div>
-        <label className="toggle">
-          <input type="checkbox" checked={useRag} onChange={e => {
-            setUseRag(e.target.checked); save("use_rag", e.target.checked);
-          }} />
-          <div className="toggle-track" />
-          <div className="toggle-thumb" />
-        </label>
-      </div>
-
-      {/* ── MODEL FALLBACK ── */}
-      <div className="settings-item">
-        <div>
-          <div className="settings-label">Fall Back to Saved Models</div>
-          <div className="settings-sub">If the current model fails before replying, try your other saved models in list order</div>
-        </div>
-        <label className="toggle">
-          <input type="checkbox" checked={useFallbacks} onChange={e => {
-            setUseFallbacks(e.target.checked); save("use_fallbacks", e.target.checked);
-          }} />
-          <div className="toggle-track" />
-          <div className="toggle-thumb" />
-        </label>
-      </div>
-
-      {/* ── FONT SIZE ── */}
-      <div style={{ padding: "16px" }}>
-        <div style={{ fontSize: 12, fontFamily: "var(--mono)", color: "var(--text3)", marginBottom: 12, letterSpacing: "0.5px", textTransform: "uppercase" }}>
-          Chat Font Size — {fontSize}px
-        </div>
-        <input type="range" min={14} max={22} value={fontSize}
-          onChange={e => { const v = parseInt(e.target.value); setFontSize(v); save("font_size", v); }}
-          style={{ width: "100%", accentColor: "var(--accent)" }} />
-        <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4 }}>
-          <span style={{ fontSize: 12, color: "var(--text3)" }}>Small</span>
-          <span style={{ fontSize: 12, color: "var(--text3)" }}>Large</span>
-        </div>
-        <div style={{ marginTop: 16, padding: 14, background: "var(--bg3)", borderRadius: "var(--radius-sm)", fontSize, fontStyle: "italic", color: "var(--text2)" }}>
-          She looked away, biting her lip as if weighing whether to say it.
-        </div>
-      </div>
-
-      <div style={{ height: 1, background: "var(--border)", margin: "4px 0 0" }} />
-
-      {/* ── ACCOUNT ── */}
-      <div className="settings-item">
-        <div>
-          <div className="settings-label">Signed in</div>
-          <div className="settings-sub">{localStorage.getItem("auth_email") || ""}</div>
-        </div>
-        <button className="btn btn-ghost btn-sm" onClick={async () => {
-          try { await api.logout(); } catch {}
-          clearSession();
-          nav("/login", { replace: true });
-        }}>
-          <LogOut size={14} /> Log out
-        </button>
-      </div>
-
-      <div style={{ height: 1, background: "var(--border)", margin: "4px 0 0" }} />
-
-      {/* ── TEST CHAT ── */}
-      <div style={{ padding: "16px 16px 8px" }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
-          <div>
-            <div style={{ fontSize: 12, fontFamily: "var(--mono)", color: "var(--text3)", letterSpacing: "0.5px", textTransform: "uppercase" }}>
-              Model Test Chat
-            </div>
-            <div style={{ fontSize: 12, color: "var(--text3)", marginTop: 3 }}>
-              Raw model, no character context
-            </div>
-          </div>
-          {testMessages.length > 0 && (
-            <button className="btn-icon" style={{ color: "var(--text3)" }}
-              onClick={() => { setTestMessages([]); setTestStreamText(""); }}>
-              <Trash2 size={16} />
-            </button>
-          )}
-        </div>
-
-        {/* Messages */}
-        <div style={{
-          background: "var(--bg2)", borderRadius: "var(--radius-sm)",
-          border: "1px solid var(--border)", minHeight: 120, maxHeight: 320,
-          overflowY: "auto", padding: 12, display: "flex", flexDirection: "column", gap: 10,
-        }}>
-          {testMessages.length === 0 && !testStreaming && (
-            <div style={{ color: "var(--text3)", fontSize: 14, textAlign: "center", margin: "auto" }}>
-              Send a message to test the model
-            </div>
-          )}
-          {testMessages.map((m, i) => (
-            <div key={i} style={{
-              display: "flex", justifyContent: m.role === "user" ? "flex-end" : "flex-start"
-            }}>
-              <div style={{
-                maxWidth: "85%", padding: "8px 12px", fontSize: 15, lineHeight: 1.6,
-                borderRadius: m.role === "user"
-                  ? "var(--radius-lg) var(--radius-lg) 4px var(--radius-lg)"
-                  : "var(--radius-lg) var(--radius-lg) var(--radius-lg) 4px",
-                background: m.role === "user" ? "var(--bg4)" : "var(--bg3)",
-                border: `1px solid ${m.role === "user" ? "var(--border)" : "var(--border2)"}`,
-                color: m.role === "user" ? "var(--text2)" : "var(--text)",
-                whiteSpace: "pre-wrap", wordBreak: "break-word",
-              }}>
-                {m.content}
-              </div>
-            </div>
-          ))}
-          {testStreaming && testStreamText && (
-            <div style={{ display: "flex", justifyContent: "flex-start" }}>
-              <div style={{
-                maxWidth: "85%", padding: "8px 12px", fontSize: 15, lineHeight: 1.6,
-                borderRadius: "var(--radius-lg) var(--radius-lg) var(--radius-lg) 4px",
-                background: "var(--bg3)", border: "1px solid var(--border2)",
-                color: "var(--text)", whiteSpace: "pre-wrap", wordBreak: "break-word",
-              }} className="streaming-cursor">
-                {testStreamText}
-              </div>
-            </div>
-          )}
-          {testStreaming && !testStreamText && (
-            <div style={{ display: "flex", gap: 5, padding: "4px 0", alignItems: "center" }}>
-              {[0,1,2].map(i => (
-                <div key={i} style={{
-                  width: 5, height: 5, borderRadius: "50%", background: "var(--accent)",
-                  animation: "pulse 1.2s infinite", animationDelay: `${i * 0.2}s`
-                }} />
-              ))}
-            </div>
-          )}
-          <div ref={testBottomRef} />
-        </div>
-
-        {/* Input */}
-        <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-          <input
-            className="input"
-            placeholder="Type to test model…"
-            value={testInput}
-            onChange={e => setTestInput(e.target.value)}
-            onKeyDown={e => { if (e.key === "Enter") sendTestMessage(); }}
-            style={{ flex: 1, fontSize: 15 }}
-            disabled={testStreaming}
+        <Section {...section("memory")} title="Memory & behavior" sub="How the story remembers and recovers" Icon={Brain}>
+          <ToggleSetting
+            label="Auto memory update"
+            sub="Updates memory every 6 turns automatically"
+            checked={autoMem}
+            onChange={v => { setAutoMem(v); save("auto_memory", v); }}
           />
-          <button onClick={sendTestMessage} disabled={!testInput.trim() || testStreaming} style={{
-            width: 40, height: 40, borderRadius: "50%", border: "none", flexShrink: 0,
-            background: testInput.trim() && !testStreaming ? "var(--accent)" : "var(--bg4)",
-            color: testInput.trim() && !testStreaming ? "#1a1208" : "var(--text3)",
-            display: "flex", alignItems: "center", justifyContent: "center",
-            cursor: testInput.trim() && !testStreaming ? "pointer" : "default",
-            transition: "all 0.15s",
-          }}>
-            <Send size={16} />
-          </button>
-        </div>
-      </div>
+          <ToggleSetting
+            label="Embed memory for retrieval"
+            sub="Saves each memory update so old details can be recalled in very long chats (uses your Gemini key)"
+            checked={useRag}
+            onChange={v => { setUseRag(v); save("use_rag", v); }}
+          />
+          <ToggleSetting
+            label="Fall back to saved models"
+            sub="If the current model fails before replying, try your other saved models in list order"
+            checked={useFallbacks}
+            onChange={v => { setUseFallbacks(v); save("use_fallbacks", v); }}
+          />
+        </Section>
 
-      <div style={{ height: 1, background: "var(--border)", margin: "8px 0 0" }} />
-
-      {/* ── ERROR LOG ── */}
-      <div style={{ padding: "16px" }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
-          <div>
-            <div style={{ fontSize: 12, fontFamily: "var(--mono)", color: "var(--text3)", letterSpacing: "0.5px", textTransform: "uppercase" }}>
-              Error Log
+        <Section {...section("reading")} title="Reading" sub={`Chat text size · ${fontSize}px`} Icon={BookOpenText}>
+          <div className="field">
+            <div className="subhead">
+              <label className="field-label" htmlFor="font-size">Chat font size</label>
+              <span className="mono field-hint">{fontSize}px</span>
             </div>
-            <div style={{ fontSize: 12, color: "var(--text3)", marginTop: 3 }}>
-              Failed model calls from the last 14 days
-            </div>
+            <input id="font-size" className="range" type="range" min={14} max={22} value={fontSize}
+              style={{ "--fill": `${((fontSize - 14) / 8) * 100}%` }}
+              onChange={e => { const v = parseInt(e.target.value); setFontSize(v); save("font_size", v); }} />
+            <div className="subhead field-hint"><span>Smaller</span><span>Larger</span></div>
           </div>
-          <div style={{ display: "flex", gap: 4 }}>
-            <button className="btn-icon" style={{ color: "var(--text3)" }} onClick={loadErrorLog}>
-              <RefreshCw size={16} />
-            </button>
-            {errorLog?.length > 0 && (
-              <button className="btn-icon" style={{ color: "var(--text3)" }} onClick={clearErrorLog}>
-                <Trash2 size={16} />
-              </button>
+          <div className="preview-prose" style={{ "--prose-size": `${fontSize}px` }}>
+            <div className="speaker">Preview</div>
+            <Prose text={PREVIEW_TEXT} />
+          </div>
+        </Section>
+
+        <Section {...section("tools")} title="Tools" sub="Test the model, read recent errors" Icon={Wrench}>
+          <div className="field">
+            <div className="subhead">
+              <div>
+                <div className="subhead__title">Model test chat</div>
+                <div className="subhead__sub">Raw model, no character context</div>
+              </div>
+              {testMessages.length > 0 && (
+                <button className="icon-btn" aria-label="Clear test chat"
+                  onClick={() => { setTestMessages([]); setTestStreamText(""); }}>
+                  <Trash2 size={16} />
+                </button>
+              )}
+            </div>
+            <div className="mini-transcript" ref={testScrollRef}>
+              {testMessages.length === 0 && !testStreaming && (
+                <div className="field-hint" style={{ margin: "auto" }}>Send a message to test the model</div>
+              )}
+              {testMessages.map((m, i) => (
+                <Turn key={i} role={m.role} mode="plain" text={m.content} speaker="Model"
+                  showSpeaker={testMessages[i - 1]?.role !== "assistant"} />
+              ))}
+              {testStreaming && testStreamText && (
+                <Turn role="assistant" mode="plain" text={testStreamText} speaker="Model" showSpeaker caret />
+              )}
+              {testStreaming && !testStreamText && <Thinking speaker="Model" />}
+            </div>
+            <Composer
+              value={testInput}
+              onChange={setTestInput}
+              onSend={sendTestMessage}
+              placeholder="Type to test the model…"
+              canSend={!!testInput.trim() && !testStreaming}
+              busy={testStreaming}
+              fontSize={16}
+            />
+          </div>
+
+          <div className="divider" />
+
+          <div className="field">
+            <div className="subhead">
+              <div>
+                <div className="subhead__title">Error log</div>
+                <div className="subhead__sub">Failed model calls from the last 14 days</div>
+              </div>
+              <div className="btn-row">
+                <button className="icon-btn" aria-label="Refresh error log" disabled={!!busy} onClick={() => runBusy("logs", loadErrorLog)}>
+                  <BusyIcon busy={busy === "logs"} Icon={RefreshCw} />
+                </button>
+                {errorLog?.length > 0 && (
+                  <button className="icon-btn" aria-label="Clear error log" disabled={!!busy} onClick={() => runBusy("clear-logs", clearErrorLog)}>
+                    <BusyIcon busy={busy === "clear-logs"} Icon={Trash2} />
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {errorLog === null ? (
+              <div>
+                <button className="btn btn-ghost btn-sm" disabled={!!busy} onClick={() => runBusy("logs", loadErrorLog)}>
+                  {busy === "logs" ? "Loading…" : "Show errors"}
+                </button>
+              </div>
+            ) : errorLog.length === 0 ? (
+              <div className="saved-empty">No errors logged.</div>
+            ) : (
+              <div className="log-list">
+                {errorLog.map(e => (
+                  <div key={e.id} className="log-item">
+                    <div className="log-item__head">
+                      {e.kind} · {e.provider} / {e.model}
+                      {e.fell_back ? <span className="tag">tried again</span> : null}
+                    </div>
+                    <div className="log-item__time">{new Date(e.created_at + "Z").toLocaleString()}</div>
+                    <div className="log-item__msg">{e.message}</div>
+                  </div>
+                ))}
+              </div>
             )}
           </div>
-        </div>
+        </Section>
 
-        {errorLog === null ? (
-          <button className="btn btn-ghost btn-sm" onClick={loadErrorLog}>Show errors</button>
-        ) : errorLog.length === 0 ? (
-          <div style={{ fontSize: 13, color: "var(--text3)" }}>No errors logged.</div>
-        ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 360, overflowY: "auto" }}>
-            {errorLog.map(e => (
-              <div key={e.id} style={{
-                padding: "10px 12px", borderRadius: "var(--radius-sm)",
-                background: "var(--bg3)", border: "1px solid var(--border)",
-              }}>
-                <div style={{ fontSize: 12, fontFamily: "var(--mono)", color: "var(--text2)" }}>
-                  {e.kind} · {e.provider} / {e.model}
-                  {e.fell_back ? <span style={{ color: "var(--accent)", marginLeft: 8 }}>tried again</span> : null}
-                </div>
-                <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 2 }}>
-                  {new Date(e.created_at + "Z").toLocaleString()}
-                </div>
-                <div style={{ fontSize: 12, fontFamily: "var(--mono)", color: "var(--error)", marginTop: 6, wordBreak: "break-word" }}>
-                  {e.message}
-                </div>
-              </div>
-            ))}
+        <Section {...section("account")} title="Account" sub={localStorage.getItem("auth_email") || "Signed in"} Icon={UserRound}>
+          <div className="setting">
+            <div>
+              <div className="setting__label">Signed in</div>
+              <div className="setting__sub">{localStorage.getItem("auth_email") || ""}</div>
+            </div>
+            <button className="btn btn-ghost btn-sm" disabled={busy === "logout"} onClick={() => runBusy("logout", async () => {
+              try { await api.logout(); } catch {}
+              clearSession();
+              nav("/login", { replace: true });
+            })}>
+              <BusyIcon busy={busy === "logout"} Icon={LogOut} size={15} /> {busy === "logout" ? "Signing out…" : "Log out"}
+            </button>
           </div>
-        )}
+        </Section>
       </div>
-
-      <div style={{ height: 32 }} />
     </div>
   );
 }

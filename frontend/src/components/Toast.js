@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState, useCallback } from "react";
+import { ActivityNotice } from "./Activity";
 
 const ToastCtx = createContext(null);
 
@@ -14,7 +15,8 @@ export function ToastProvider({ children }) {
   return (
     <ToastCtx.Provider value={add}>
       {children}
-      <div className="toast-container">
+      <div className="toast-container" role="status" aria-live="polite">
+        <ActivityNotice />
         {toasts.map(t => (
           <div key={t.id} className={`toast toast-${t.type}`}>{t.msg}</div>
         ))}

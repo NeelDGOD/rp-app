@@ -1,25 +1,29 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { Plus, MoreHorizontal, Trash2, PenLine } from "lucide-react";
+import { Plus, PenLine, Sparkles, Trash2 } from "lucide-react";
 import { api } from "../lib/api";
-import { useSlowLoad } from "../lib/useSlowLoad";
+import { useBusy, useConfirmTap } from "../lib/ui";
 import BottomSheet from "../components/BottomSheet";
+import ChatList from "../components/ChatList";
+import { BusyIcon, EmptyState, ErrorState, ListSkeleton, PageHeader } from "../components/States";
 import { useToast } from "../components/Toast";
 
 export default function AIChatsPage() {
   const [chats, setChats] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
   const [sheet, setSheet] = useState(null); // {chat} for options
   const [renameVal, setRenameVal] = useState("");
   const nav   = useNavigate();
   const toast = useToast();
-  const slowLoad = useSlowLoad(loading);
+  const [busy, runBusy] = useBusy();
+  const { armed, confirm } = useConfirmTap();
 
   const load = useCallback(async () => {
     try {
       const c = await api.getAIChats();
-      setChats(c);
-    } catch (e) { toast(e.message, "error"); }
+      setChats(c); setLoadError("");
+    } catch (e) { setLoadError(e.message); toast(e.message, "error"); }
     finally { setLoading(false); }
   }, []);
 
@@ -45,58 +49,55 @@ export default function AIChatsPage() {
 
   return (
     <div className="page">
-      <div className="page-header">
-        <span className="page-title">AI Chat</span>
-        <button className="btn-icon" onClick={createChat}>
-          <Plus size={22} />
+      <PageHeader title="AI" kicker="Plain assistant, no character">
+        <button className="btn btn-ghost btn-sm" onClick={() => runBusy("create", createChat)} disabled={busy === "create"}>
+          <BusyIcon busy={busy === "create"} Icon={Plus} /> New chat
         </button>
+      </PageHeader>
+
+      <div className="col">
+        {loading && <ListSkeleton />}
+
+        {!loading && loadError && chats.length === 0 && (
+          <ErrorState message={loadError} onRetry={() => { setLoading(true); load(); }} />
+        )}
+
+        {!loading && !loadError && chats.length === 0 && (
+          <EmptyState
+            icon={Sparkles}
+            title="Nothing asked yet"
+            text="For plain questions, research and quick drafts."
+            action={<button className="btn btn-primary" onClick={() => runBusy("create", createChat)} disabled={busy === "create"}><BusyIcon busy={busy === "create"} Icon={Plus} size={17} /> New AI chat</button>}
+          />
+        )}
+
+        {!loading && chats.length > 0 && (
+          <ChatList
+            chats={chats}
+            metaFor={() => "Assistant"}
+            onOpen={c => nav(`/ai-chats/${c.id}`)}
+            onMore={c => { setRenameVal(c.name); setSheet(c); }}
+          />
+        )}
       </div>
 
-      {loading && (
-        <div style={{ padding: 32, textAlign: "center", color: "var(--text3)" }}>
-          Loading…
-          {slowLoad && (
-            <div style={{ marginTop: 8, fontSize: 13 }}>
-              ⚡ Waking up the server — this can take up to a minute on the free tier.
-            </div>
-          )}
-        </div>
-      )}
-
-      {!loading && chats.length === 0 && (
-        <div style={{ padding: 48, textAlign: "center", color: "var(--text3)" }}>
-          <div style={{ fontSize: 32, marginBottom: 12 }}>✦</div>
-          <div>No AI chats yet</div>
-          <div style={{ fontSize: 14, marginTop: 6 }}>Tap + to start a plain assistant chat</div>
-        </div>
-      )}
-
-      {chats.map(c => (
-        <div key={c.id} className="chat-item" onClick={() => nav(`/ai-chats/${c.id}`)}>
-          <div className="chat-item-info">
-            <div className="chat-item-name">{c.name}</div>
-            <div className="chat-item-sub">Assistant</div>
-          </div>
-          <button className="btn-icon" onClick={e => { e.stopPropagation(); setRenameVal(c.name); setSheet(c); }}>
-            <MoreHorizontal size={18} />
-          </button>
-        </div>
-      ))}
-
-      {/* Chat options sheet */}
       {sheet && (
         <BottomSheet title={sheet.name} onClose={() => setSheet(null)}>
-          <input className="input" placeholder="Rename…" value={renameVal}
-            onChange={e => setRenameVal(e.target.value)}
-            onKeyDown={e => e.key === "Enter" && renameChat(sheet.id)} autoFocus />
-          <button className="btn btn-ghost" style={{ width: "100%", justifyContent: "flex-start", gap: 10 }}
-            onClick={() => renameChat(sheet.id)}>
-            <PenLine size={16} /> Rename
-          </button>
-          <button className="btn btn-danger" style={{ width: "100%", justifyContent: "flex-start", gap: 10 }}
-            onClick={() => deleteChat(sheet.id)}>
-            <Trash2 size={16} /> Delete
-          </button>
+          <div className="input-row">
+            <input className="input" aria-label="New name" placeholder="Rename…" value={renameVal}
+              onChange={e => setRenameVal(e.target.value)}
+              onKeyDown={e => e.key === "Enter" && runBusy("rename", () => renameChat(sheet.id))} autoFocus />
+            <button className="btn btn-ghost" onClick={() => runBusy("rename", () => renameChat(sheet.id))} disabled={!renameVal.trim() || !!busy}>
+              <BusyIcon busy={busy === "rename"} Icon={PenLine} /> Rename
+            </button>
+          </div>
+          <div className="action-list">
+            <button className={`action action--danger${armed === sheet.id ? " is-armed" : ""}`} disabled={!!busy}
+              onClick={() => confirm(sheet.id, () => runBusy("delete", () => deleteChat(sheet.id)))}>
+              <BusyIcon busy={busy === "delete"} Icon={Trash2} size={18} />
+              {busy === "delete" ? "Deleting…" : armed === sheet.id ? "Tap again to delete for good" : "Delete chat"}
+            </button>
+          </div>
         </BottomSheet>
       )}
     </div>

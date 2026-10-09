@@ -86,6 +86,16 @@ export function onSyncFailed(listener) {
   return () => syncListeners.delete(listener);
 }
 
+// UI feedback only: true while a settings change is waiting to be uploaded.
+const syncPendingListeners = new Set();
+const emitSyncPending = () => syncPendingListeners.forEach(fn => fn(pushPending));
+
+export function onSyncPending(listener) {
+  syncPendingListeners.add(listener);
+  listener(pushPending);
+  return () => syncPendingListeners.delete(listener);
+}
+
 export function onSettingsPulled(listener) {
   pulledListeners.add(listener);
   return () => pulledListeners.delete(listener);
@@ -134,12 +144,14 @@ async function pushSettings(attempt = 0) {
       pushPending = false;
     }
   }
+  emitSyncPending();
 }
 
 export function pushSettingsSoon() {
   clearTimeout(pushTimer);
   pushPending = true;
   pushTimer = setTimeout(pushSettings, 800);
+  emitSyncPending();
 }
 
 function fallbackModels(provider, model) {
@@ -181,14 +193,34 @@ function getHeaders() {
 // drop, a longer one gives a cold instance more time to finish waking up.
 const RETRY_DELAYS_MS = [800, 2500];
 
+// UI activity feedback only: how many requests are waiting for a response, and how many are retrying.
+const activity = { pending: 0, retrying: 0 };
+const activityListeners = new Set();
+const emitActivity = () => activityListeners.forEach(fn => fn({ ...activity }));
+
+export function onActivity(listener) {
+  activityListeners.add(listener);
+  listener({ ...activity });
+  return () => activityListeners.delete(listener);
+}
+
 async function fetchWithRetry(url, options) {
-  for (let i = 0; ; i++) {
-    try {
-      return await fetch(url, options);
-    } catch (err) {
-      if (i >= RETRY_DELAYS_MS.length) throw err;
-      await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[i]));
+  activity.pending++; emitActivity();
+  let retried = false;
+  try {
+    for (let i = 0; ; i++) {
+      try {
+        return await fetch(url, options);
+      } catch (err) {
+        if (i >= RETRY_DELAYS_MS.length) throw err;
+        if (!retried) { retried = true; activity.retrying++; emitActivity(); }
+        await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[i]));
+      }
     }
+  } finally {
+    activity.pending--;
+    if (retried) activity.retrying--;
+    emitActivity();
   }
 }
 

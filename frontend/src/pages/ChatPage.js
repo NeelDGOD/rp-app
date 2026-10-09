@@ -5,13 +5,16 @@ import { useParams, useNavigate } from "react-router-dom";
 import {
   ChevronLeft, RotateCcw, Undo2, Bookmark, BookmarkCheck,
   ChevronLeft as ArrowL, ChevronRight as ArrowR,
-  Sparkles, Brain, Search, X, Send
+  Sparkles, Brain, Search, X
 } from "lucide-react";
 import { api } from "../lib/api";
-import { useSlowLoad } from "../lib/useSlowLoad";
+import { useAutoGrow, useBusy, useScrollToEnd } from "../lib/ui";
+import { parseServerDate } from "../lib/time";
 import BottomSheet from "../components/BottomSheet";
 import { useToast } from "../components/Toast";
 import ModelPickerButton from "../components/ModelPickerButton";
+import { BusyIcon, ErrorState, Spinner, TranscriptSkeleton } from "../components/States";
+import { Composer, Thinking, Turn } from "../components/Transcript";
 
 const COMMANDS_REF = `GENERAL
   retry              re-generate last reply
@@ -124,18 +127,23 @@ export default function ChatPage() {
   const [searchQuery, setSearchQuery]   = useState("");
   const [editingMsg, setEditingMsg]     = useState(null); // {visibleIndex, role, content}
   const [editText, setEditText]         = useState("");
+  const [loadError, setLoadError]       = useState("");
+  const [botName, setBotName]           = useState("");
+  const [reloadKey, setReloadKey]       = useState(0);
+  const [memState, setMemState]         = useState(null); // null | "working" | "done" | "failed"
+  const [busy, runBusy]                 = useBusy();
 
-  const bottomRef = useRef(null);
+  const scrollerRef = useRef(null);
   const inputRef  = useRef(null);
   const fontSz    = parseInt(localStorage.getItem("font_size") || "17");
   const autoMem   = localStorage.getItem("auto_memory") !== "false";
-  const slowLoad  = useSlowLoad(!chat || !activeBranch);
 
   // ── LOAD ──
   const loadChat = useCallback(async () => {
     try {
       const data = await api.getChat(chatId);
       setChat(data);
+      setLoadError("");
       const branches = data.branches || [];
       setAllBranches(branches);
       if (branches.length === 0) return;
@@ -149,7 +157,7 @@ export default function ChatPage() {
       });
       const saved = sessionStorage.getItem(`draft_${chatId}`);
       if (saved) setInput(saved);
-    } catch (e) { toast(e.message, "error"); }
+    } catch (e) { setLoadError(e.message); toast(e.message, "error"); }
   }, [chatId]);
 
   useEffect(() => {
@@ -162,11 +170,17 @@ export default function ChatPage() {
         return prev;
       });
     });
-  }, [loadChat]);
+  }, [loadChat, reloadKey]);
 
+  useScrollToEnd(scrollerRef, activeBranch?.history, streamText);
+
+  // Only for the small name label above the character's lines.
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [activeBranch?.history, streamText]);
+    if (!chat?.bot_id) return;
+    api.getBots()
+      .then(bs => setBotName(bs.find(b => b.id === chat.bot_id)?.name || ""))
+      .catch(() => {});
+  }, [chat?.bot_id]);
 
   useEffect(() => {
     sessionStorage.setItem(`draft_${chatId}`, input);
@@ -297,13 +311,22 @@ export default function ChatPage() {
 
   // ── MEMORY ──
   async function triggerMemoryUpdate(branchId, silent = false) {
+    setMemState("working");
     try {
       await api.updateMemory(branchId || activeBranch.id);
+      setMemState("done");
       if (!silent) toast("Memory updated", "success", 2000);
     } catch (e) {
+      setMemState("failed");
       toast(`Memory update failed: ${e.message}`, "error", 7000);
     }
   }
+
+  useEffect(() => {
+    if (memState !== "done" && memState !== "failed") return;
+    const t = setTimeout(() => setMemState(null), 3500);
+    return () => clearTimeout(t);
+  }, [memState]);
 
   // ── BOOKMARK ──
   async function saveBookmark() {
@@ -358,185 +381,199 @@ export default function ChatPage() {
     return messages.filter(m => m.content.toLowerCase().includes(q));
   }, [messages, searchQuery]);
 
+  const proseVars = { "--prose-size": `${fontSz}px` };
+
   if (!chat || !activeBranch) {
     return (
-      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100dvh", color: "var(--text3)", gap: 8, textAlign: "center", padding: 24 }}>
-        <div>Loading…</div>
-        {slowLoad && (
-          <div style={{ fontSize: 13 }}>
-            ⚡ Waking up the server — this can take up to a minute on the free tier.
+      <div className="chat-screen" style={proseVars}>
+        <header className="bar">
+          <div className="chat-col bar__inner">
+            <button className="icon-btn bar__back" onClick={() => nav("/chats")} aria-label="Back to chats"><ChevronLeft size={22} /></button>
           </div>
+        </header>
+        {loadError && !chat ? (
+          <div className="center-state">
+            <ErrorState message={loadError} onRetry={() => { setLoadError(""); setReloadKey(k => k + 1); }} />
+          </div>
+        ) : (
+          <div className="scroller"><div className="chat-col"><TranscriptSkeleton /></div></div>
         )}
       </div>
     );
   }
 
   const displayMessages = sheet === "search" ? filteredMessages : messages;
+  const tools = [
+    { label: "Retry", Icon: RotateCcw, onClick: () => setSheet("retry") },
+    { label: "Undo", Icon: Undo2, onClick: () => runBusy("undo", doUndo), busy: busy === "undo" },
+    { label: "Style", Icon: Sparkles, onClick: () => setSheet("style") },
+    { label: "Save", Icon: Bookmark, onClick: () => setSheet("bookmark") },
+    ...(!autoMem ? [{ label: "Remember", Icon: Brain, onClick: () => triggerMemoryUpdate(), busy: memState === "working" }] : []),
+  ];
+  const memChip = memState && (
+    <span className={`status-chip${memState === "failed" ? " is-error" : ""}`} role="status">
+      {memState === "working" && <><Spinner size={13} /> Updating memory…</>}
+      {memState === "done" && "Memory updated"}
+      {memState === "failed" && "Memory update failed"}
+    </span>
+  );
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100dvh", background: "var(--bg)" }}>
+    <div className="chat-screen" style={proseVars}>
 
       {/* ── HEADER ── */}
-      <div style={{
-        display: "flex", alignItems: "center", gap: 10, padding: "12px 12px 10px",
-        borderBottom: "1px solid var(--border)", background: "var(--bg)",
-        position: "sticky", top: 0, zIndex: 20,
-      }}>
-        <button className="btn-icon" onClick={() => nav("/chats")}><ChevronLeft size={22} /></button>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 17, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-            {chat.name}
+      <header className="bar">
+        <div className="chat-col bar__inner">
+          <button className="icon-btn bar__back" onClick={() => nav("/chats")} aria-label="Back to chats"><ChevronLeft size={22} /></button>
+          <div className="bar__title">
+            <h1 className="bar__name">{chat.name}</h1>
+            <div className="bar__sub">
+              <ModelPickerButton />
+              {allBranches.length > 1 && <span className="bar__branches">{allBranches.length} branches</span>}
+            </div>
           </div>
-          <div style={{ fontSize: 11, fontFamily: "var(--mono)", color: "var(--text3)", marginTop: 1 }}>
-            <ModelPickerButton />
-            {allBranches.length > 1 ? ` · ${allBranches.length} branches` : ""}
-          </div>
+          <button className="icon-btn" onClick={() => setSheet("search")} aria-label="Search this chat"><Search size={19} /></button>
+          <button className="icon-btn" onClick={() => runBusy("bookmarks", openBookmarks)} disabled={busy === "bookmarks"} aria-label="Bookmarks">
+            <BusyIcon busy={busy === "bookmarks"} Icon={BookmarkCheck} size={19} />
+          </button>
         </div>
-        <button className="btn-icon" onClick={() => setSheet("search")}><Search size={18} /></button>
-        <button className="btn-icon" onClick={openBookmarks}><BookmarkCheck size={18} /></button>
+      </header>
+
+      {/* ── TRANSCRIPT ── */}
+      <div className="scroller" ref={scrollerRef}>
+        <div className="chat-col transcript">
+          {messages.length === 0 && !streaming && (
+            <div className="chat-empty">
+              <div className="chat-empty__orn" aria-hidden="true">⁂</div>
+              <div className="chat-empty__title">A blank page</div>
+              <p className="chat-empty__text">
+                Set the scene, or simply say hello{botName ? ` to ${botName}` : ""}. Type <span className="mono">/commands</span> for the command list.
+              </p>
+            </div>
+          )}
+
+          {displayMessages.map((msg, i) => {
+            const forks = forkMap.get(i);
+            const isEditing = editingMsg?.visibleIndex === i;
+            const showSpeaker = msg.role === "assistant" && displayMessages[i - 1]?.role !== "assistant";
+            return (
+              <React.Fragment key={i}>
+                {isEditing ? (
+                  <EditPanel
+                    msg={msg}
+                    fontSize={fontSz}
+                    editText={editText}
+                    saving={busy === "edit"}
+                    onEditChange={setEditText}
+                    onEditConfirm={() => {
+                      if (msg.role === "assistant") runBusy("edit", () => doEditLuna(i, editText));
+                      else doEditUser(i, editText);
+                    }}
+                    onEditCancel={() => setEditingMsg(null)}
+                  />
+                ) : (
+                  <Turn
+                    role={msg.role}
+                    speaker={botName}
+                    showSpeaker={showSpeaker}
+                    text={msg.content}
+                    onActivate={() => { setEditingMsg({ visibleIndex: i, role: msg.role }); setEditText(msg.content); }}
+                  />
+                )}
+                {forks && (
+                  <InlineBranchArrows
+                    forks={forks}
+                    activeBranch={activeBranch}
+                    msgIndex={i}
+                    onSwitch={(branch) => switchBranch(branch)}
+                  />
+                )}
+              </React.Fragment>
+            );
+          })}
+
+          {streaming && streamText && (
+            <Turn role="assistant" speaker={botName}
+              showSpeaker={displayMessages[displayMessages.length - 1]?.role !== "assistant"}
+              text={streamText} caret />
+          )}
+          {streaming && !streamText && <Thinking speaker={botName} />}
+        </div>
       </div>
 
-      {/* ── MESSAGES ── */}
-      <div style={{ flex: 1, overflowY: "auto", padding: "12px 12px 4px" }}>
-        {displayMessages.map((msg, i) => {
-          const forks = forkMap.get(i);
-          return (
-            <React.Fragment key={i}>
-              <MessageBubble
-                msg={msg}
-                fontSize={fontSz}
-                visibleIndex={i}
-                isEditing={editingMsg?.visibleIndex === i}
-                editText={editingMsg?.visibleIndex === i ? editText : ""}
-                onEditStart={() => { setEditingMsg({ visibleIndex: i, role: msg.role }); setEditText(msg.content); }}
-                onEditChange={setEditText}
-                onEditConfirm={() => {
-                  if (msg.role === "assistant") doEditLuna(i, editText);
-                  else doEditUser(i, editText);
-                }}
-                onEditCancel={() => setEditingMsg(null)}
-              />
-              {forks && (
-                <InlineBranchArrows
-                  forks={forks}
-                  activeBranch={activeBranch}
-                  msgIndex={i}
-                  onSwitch={(branch) => switchBranch(branch)}
-                />
-              )}
-            </React.Fragment>
-          );
-        })}
-
-        {streaming && streamText && (
-          <MessageBubble msg={{ role: "assistant", content: streamText }} fontSize={fontSz} isStreaming />
-        )}
-        {streaming && !streamText && (
-          <div style={{ display: "flex", gap: 6, padding: "10px 4px", alignItems: "center" }}>
-            {[0,1,2].map(i => (
-              <div key={i} style={{
-                width: 6, height: 6, borderRadius: "50%", background: "var(--accent)",
-                animation: "pulse 1.2s infinite", animationDelay: `${i * 0.2}s`
-              }} />
+      {/* ── DOCK: TOOLBAR + COMPOSER ── */}
+      <div className="dock">
+        <div className="chat-col">
+          <div className="toolbar" role="toolbar" aria-label="Story tools">
+            {memChip}
+            {tools.map(({ label, Icon, onClick, busy: toolBusy }) => (
+              <button key={label} className="chip" onClick={onClick} disabled={streaming || !!busy || toolBusy} aria-busy={toolBusy || undefined}>
+                <BusyIcon busy={toolBusy} Icon={Icon} size={15} /> {label}
+              </button>
             ))}
           </div>
-        )}
-
-        <div ref={bottomRef} style={{ height: 8 }} />
-      </div>
-
-      {/* ── TOOLBAR ── */}
-      <div style={{
-        display: "flex", gap: 4, padding: "8px 12px 4px",
-        borderTop: "1px solid var(--border)",
-        overflowX: "auto", scrollbarWidth: "none",
-      }}>
-        <ToolBtn icon={<RotateCcw size={15} />} label="Retry" onClick={() => setSheet("retry")} disabled={streaming} />
-        <ToolBtn icon={<Undo2 size={15} />} label="Undo" onClick={doUndo} disabled={streaming} />
-        <ToolBtn icon={<Sparkles size={15} />} label="Style" onClick={() => setSheet("style")} disabled={streaming} />
-        <ToolBtn icon={<Bookmark size={15} />} label="Save" onClick={() => setSheet("bookmark")} disabled={streaming} />
-        {!autoMem && (
-          <ToolBtn icon={<Brain size={15} />} label="Remember" onClick={() => triggerMemoryUpdate()} disabled={streaming} />
-        )}
-      </div>
-
-      {/* ── INPUT ── */}
-      <div style={{
-        display: "flex", gap: 8, padding: "8px 12px",
-        paddingBottom: "calc(8px + env(safe-area-inset-bottom, 0px))",
-        background: "var(--bg)",
-      }}>
-        <textarea
-          ref={inputRef}
-          className="input"
-          value={input}
-          onChange={e => setInput(e.target.value)}
-          onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); } }}
-          placeholder="Type a message…"
-          rows={1}
-          style={{ flex: 1, resize: "none", fontSize: fontSz, maxHeight: 120, overflowY: "auto" }}
-        />
-        <button onClick={sendMessage} disabled={!input.trim() || streaming} style={{
-          width: 42, height: 42, borderRadius: "50%", border: "none",
-          background: input.trim() && !streaming ? "var(--accent)" : "var(--bg4)",
-          color: input.trim() && !streaming ? "#1a1208" : "var(--text3)",
-          display: "flex", alignItems: "center", justifyContent: "center",
-          cursor: input.trim() && !streaming ? "pointer" : "default",
-          transition: "all 0.15s", flexShrink: 0, alignSelf: "flex-end",
-        }}>
-          <Send size={18} />
-        </button>
+          <Composer
+            inputRef={inputRef}
+            value={input}
+            onChange={setInput}
+            onSend={sendMessage}
+            placeholder={streaming ? "Writing…" : "Continue the story…"}
+            canSend={!!input.trim() && !streaming}
+            busy={streaming}
+            fontSize={fontSz}
+          />
+        </div>
       </div>
 
       {/* ── SHEETS ── */}
       {sheet === "retry" && (
         <BottomSheet title="Retry" onClose={() => setSheet(null)}>
-          <input className="input" placeholder="Direction (optional) — e.g. be more shy…"
+          <p className="sheet-note">Writes a new version of the last reply. The current one stays as a version you can flip back to.</p>
+          <input className="input" placeholder="Direction (optional), e.g. be more shy…"
             value={retryHint} onChange={e => setRetryHint(e.target.value)}
             onKeyDown={e => e.key === "Enter" && doRetry()} autoFocus />
-          <button className="btn btn-primary" style={{ width: "100%" }} onClick={doRetry}>
+          <button className="btn btn-primary btn-block" onClick={doRetry}>
             <RotateCcw size={16} /> Retry
           </button>
         </BottomSheet>
       )}
 
       {sheet === "style" && (
-        <BottomSheet title="Reply Style" onClose={() => setSheet(null)}>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+        <BottomSheet title="Reply style" onClose={() => setSheet(null)}>
+          <div className="option-grid">
             {[
               { cmd: "short",    label: "Short",    sub: "2-3 sentences" },
               { cmd: "long",     label: "Long",     sub: "Full scene" },
               { cmd: "continue", label: "Continue", sub: "Bot advances" },
               { cmd: "narrator", label: "Narrator", sub: "3rd person" },
             ].map(({ cmd, label, sub }) => (
-              <button key={cmd} onClick={() => injectStyle(cmd)} style={{
-                padding: "12px 10px", borderRadius: "var(--radius-sm)",
-                background: "var(--bg3)", border: "1px solid var(--border)",
-                cursor: "pointer", textAlign: "left",
-              }}>
-                <div style={{ fontSize: 15, color: "var(--text)", fontFamily: "var(--font)" }}>{label}</div>
-                <div style={{ fontSize: 12, color: "var(--text3)", fontFamily: "var(--mono)", marginTop: 2 }}>{sub}</div>
+              <button key={cmd} className="option" onClick={() => injectStyle(cmd)}>
+                <span className="option__title">{label}</span>
+                <span className="option__sub">{sub}</span>
               </button>
             ))}
           </div>
-          <div style={{ fontSize: 12, color: "var(--text3)", fontFamily: "var(--mono)", marginTop: 4 }}>Custom tone</div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <input className="input" placeholder='e.g. drunk, cold and distant…' id="as-input" style={{ flex: 1 }} />
-            <button className="btn btn-ghost btn-sm" onClick={() => {
-              const val = document.getElementById("as-input").value.trim();
-              if (val) injectStyle(`as ${val}`);
-            }}>Apply</button>
+          <div className="field">
+            <label className="field-label" htmlFor="as-input">Custom tone</label>
+            <div className="input-row">
+              <input className="input" placeholder="e.g. drunk, cold and distant…" id="as-input" />
+              <button className="btn btn-ghost" onClick={() => {
+                const val = document.getElementById("as-input").value.trim();
+                if (val) injectStyle(`as ${val}`);
+              }}>Apply</button>
+            </div>
           </div>
         </BottomSheet>
       )}
 
       {sheet === "bookmark" && (
-        <BottomSheet title="Save Bookmark" onClose={() => setSheet(null)}>
-          <input className="input" placeholder="Label — e.g. before the argument…"
+        <BottomSheet title="Save bookmark" onClose={() => setSheet(null)}>
+          <input className="input" placeholder="Label, e.g. before the argument…"
             value={bookmarkLabel} onChange={e => setBookmarkLabel(e.target.value)}
-            onKeyDown={e => e.key === "Enter" && saveBookmark()} autoFocus />
-          <button className="btn btn-primary" style={{ width: "100%" }} onClick={saveBookmark}>
-            <Bookmark size={16} /> Save Bookmark
+            onKeyDown={e => e.key === "Enter" && runBusy("bm-save", saveBookmark)} autoFocus />
+          <button className="btn btn-primary btn-block" onClick={() => runBusy("bm-save", saveBookmark)}
+            disabled={!bookmarkLabel.trim() || busy === "bm-save"}>
+            <BusyIcon busy={busy === "bm-save"} Icon={Bookmark} /> {busy === "bm-save" ? "Saving…" : "Save bookmark"}
           </button>
         </BottomSheet>
       )}
@@ -544,52 +581,47 @@ export default function ChatPage() {
       {sheet === "bookmarks" && (
         <BottomSheet title="Bookmarks" onClose={() => setSheet(null)}>
           {bookmarks.length === 0 && (
-            <div style={{ color: "var(--text3)", textAlign: "center", padding: 16, fontSize: 14 }}>
-              No bookmarks saved yet.
-            </div>
+            <p className="sheet-note">No bookmarks saved yet. Use <b>Save</b> above the composer to keep a moment you may want to return to.</p>
           )}
-          {bookmarks.map(bm => (
-            <div key={bm.id} style={{
-              display: "flex", alignItems: "center", gap: 10,
-              padding: "12px 0", borderBottom: "1px solid var(--border)"
-            }}>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 15 }}>{bm.label}</div>
-                <div style={{ fontSize: 12, color: "var(--text3)", fontFamily: "var(--mono)", marginTop: 2 }}>
-                  {new Date(bm.created_at).toLocaleDateString()}
+          <div>
+            {bookmarks.map(bm => (
+              <div key={bm.id} className="bm-item">
+                <div className="bm-item__body">
+                  <div className="bm-item__label">{bm.label}</div>
+                  <div className="bm-item__date">{parseServerDate(bm.created_at)?.toLocaleDateString()}</div>
                 </div>
+                <button className="btn btn-ghost btn-sm" disabled={!!busy}
+                  onClick={() => runBusy(`restore-${bm.id}`, () => restoreBookmark(bm.id))}>
+                  {busy === `restore-${bm.id}` && <Spinner size={13} />} Restore
+                </button>
+                <button className="icon-btn icon-btn--danger" aria-label={`Delete bookmark ${bm.label}`} disabled={!!busy}
+                  onClick={() => runBusy(`del-${bm.id}`, async () => {
+                    await api.deleteBookmark(bm.id);
+                    setBookmarks(bs => bs.filter(b => b.id !== bm.id));
+                  })}>
+                  <BusyIcon busy={busy === `del-${bm.id}`} Icon={X} />
+                </button>
               </div>
-              <button className="btn btn-ghost btn-sm" onClick={() => restoreBookmark(bm.id)}>Restore</button>
-              <button className="btn-icon" style={{ color: "var(--error)" }}
-                onClick={async () => {
-                  await api.deleteBookmark(bm.id);
-                  setBookmarks(bs => bs.filter(b => b.id !== bm.id));
-                }}>
-                <X size={15} />
-              </button>
-            </div>
-          ))}
+            ))}
+          </div>
         </BottomSheet>
       )}
 
       {sheet === "search" && (
-        <BottomSheet title="Search Chat" onClose={() => { setSheet(null); setSearchQuery(""); }}>
+        <BottomSheet title="Search this chat" onClose={() => { setSheet(null); setSearchQuery(""); }}>
           <input className="input" placeholder="Search messages…" value={searchQuery}
             onChange={e => setSearchQuery(e.target.value)} autoFocus />
-          {searchQuery && (
-            <div style={{ fontSize: 13, color: "var(--text3)", fontFamily: "var(--mono)" }}>
-              {filteredMessages.length} result{filteredMessages.length !== 1 ? "s" : ""}
-            </div>
-          )}
+          <p className="sheet-note mono">
+            {searchQuery
+              ? `${filteredMessages.length} result${filteredMessages.length !== 1 ? "s" : ""}, shown in the transcript`
+              : "Matching messages are shown in the transcript behind this panel."}
+          </p>
         </BottomSheet>
       )}
 
       {sheet === "commands" && (
         <BottomSheet title="/commands" onClose={() => setSheet(null)}>
-          <pre style={{
-            fontFamily: "var(--mono)", fontSize: 13, color: "var(--text2)",
-            lineHeight: 1.8, whiteSpace: "pre-wrap", padding: "4px 0"
-          }}>{COMMANDS_REF}</pre>
+          <pre className="ref">{COMMANDS_REF}</pre>
         </BottomSheet>
       )}
     </div>
@@ -613,102 +645,62 @@ function InlineBranchArrows({ forks, activeBranch, msgIndex, onSwitch }) {
   const idx = currentIdx === -1 ? 0 : currentIdx;
 
   return (
-    <div style={{
-      display: "flex", alignItems: "center", gap: 6,
-      padding: "2px 0 10px", marginLeft: 4,
-    }}>
+    <div className="versions">
       <button
-        className="btn-icon"
+        className="icon-btn"
         disabled={idx <= 0}
         onClick={() => onSwitch(forks[idx - 1])}
+        aria-label="Previous version"
       >
-        <ArrowL size={14} style={{ opacity: idx <= 0 ? 0.25 : 1 }} />
+        <ArrowL size={15} />
       </button>
-      <span style={{ fontSize: 11, fontFamily: "var(--mono)", color: "var(--text3)" }}>
-        {idx + 1} / {forks.length}
-      </span>
+      <span className="versions__count"><b>{idx + 1}</b> / {forks.length}</span>
       <button
-        className="btn-icon"
+        className="icon-btn"
         disabled={idx >= forks.length - 1}
         onClick={() => onSwitch(forks[idx + 1])}
+        aria-label="Next version"
       >
-        <ArrowR size={14} style={{ opacity: idx >= forks.length - 1 ? 0.25 : 1 }} />
+        <ArrowR size={15} />
       </button>
-      <span style={{ fontSize: 11, fontFamily: "var(--mono)", color: "var(--text3)" }}>versions</span>
+      <span className="versions__label">versions</span>
     </div>
   );
 }
 
-// ── MESSAGE BUBBLE ────────────────────────────────────────────────────────────
-function MessageBubble({ msg, fontSize, isStreaming, visibleIndex,
-  isEditing, editText, onEditStart, onEditChange, onEditConfirm, onEditCancel }) {
+// ── EDIT PANEL ────────────────────────────────────────────────────────────────
+function EditPanel({ msg, fontSize, editText, saving, onEditChange, onEditConfirm, onEditCancel }) {
   const isUser = msg.role === "user";
-
-  if (isEditing) {
-    return (
-      <div style={{ display: "flex", justifyContent: isUser ? "flex-end" : "flex-start", marginBottom: 12 }}>
-        <div style={{ maxWidth: "90%", width: "90%", display: "flex", flexDirection: "column", gap: 8 }}>
-          {msg.model && (
-            <div style={{ fontSize: 11, fontFamily: "var(--mono)", color: "var(--text3)" }}>{msg.model}</div>
-          )}
-          <textarea
-            autoFocus
-            value={editText}
-            onChange={e => onEditChange(e.target.value)}
-            onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); onEditConfirm(); } }}
-            style={{
-              width: "100%", padding: "10px 14px", borderRadius: "var(--radius-sm)",
-              background: "var(--bg3)", border: "1px solid var(--accent)",
-              color: "var(--text)", fontFamily: "var(--font)", fontSize,
-              lineHeight: 1.6, resize: "none", minHeight: 80, outline: "none",
-            }}
-          />
-          <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-            <button className="btn btn-ghost btn-sm" onClick={onEditCancel}>Cancel</button>
-            <button className="btn btn-primary btn-sm" onClick={onEditConfirm}>
-              {isUser ? "Send edited" : "Save"}
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
+  const ref = useRef(null);
+  useAutoGrow(ref, editText);
 
   return (
-    <div style={{ display: "flex", justifyContent: isUser ? "flex-end" : "flex-start", marginBottom: 4 }}
-      onClick={onEditStart}>
-      <div style={{
-        maxWidth: "85%",
-        padding: isUser ? "10px 14px" : "12px 16px",
-        borderRadius: isUser
-          ? "var(--radius-lg) var(--radius-lg) 4px var(--radius-lg)"
-          : "var(--radius-lg) var(--radius-lg) var(--radius-lg) 4px",
-        background: isUser ? "var(--bg4)" : "var(--bg2)",
-        border: isUser ? "1px solid var(--border)" : "1px solid var(--border2)",
-        fontSize, lineHeight: 1.65,
-        color: isUser ? "var(--text2)" : "var(--text)",
-        whiteSpace: "pre-wrap", wordBreak: "break-word",
-        cursor: "text",
-      }} className={isStreaming ? "streaming-cursor" : ""}>
-        {msg.content}
+    <div className="edit-panel">
+      <div className="edit-panel__head">
+        <span>{isUser ? "Editing your line" : "Editing reply"}</span>
+        {msg.model && <span className="edit-panel__model">{msg.model}</span>}
+      </div>
+      <textarea
+        ref={ref}
+        autoFocus
+        aria-label={isUser ? "Edit your line" : "Edit reply"}
+        value={editText}
+        onChange={e => onEditChange(e.target.value)}
+        onKeyDown={e => {
+          if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); onEditConfirm(); }
+          if (e.key === "Escape") onEditCancel();
+        }}
+        style={{ fontSize }}
+      />
+      <div className="edit-panel__foot">
+        <span className="edit-panel__hint">
+          {isUser ? "Sending writes a new reply as another version." : "Saves this reply in place."}
+        </span>
+        <button className="btn btn-quiet btn-sm" onClick={onEditCancel}>Cancel</button>
+        <button className="btn btn-primary btn-sm" onClick={onEditConfirm} disabled={saving}>
+          {saving && <Spinner size={13} />} {isUser ? "Send edited" : saving ? "Saving…" : "Save"}
+        </button>
       </div>
     </div>
-  );
-}
-
-// ── TOOLBAR BUTTON ────────────────────────────────────────────────────────────
-function ToolBtn({ icon, label, onClick, disabled }) {
-  return (
-    <button onClick={onClick} disabled={disabled} style={{
-      display: "flex", flexDirection: "column", alignItems: "center", gap: 3,
-      padding: "6px 10px", borderRadius: "var(--radius-sm)", border: "none",
-      background: "transparent", cursor: disabled ? "default" : "pointer",
-      color: disabled ? "var(--text3)" : "var(--text2)",
-      opacity: disabled ? 0.4 : 1, minWidth: 52, flexShrink: 0,
-      transition: "all 0.15s", WebkitTapHighlightColor: "transparent",
-    }}>
-      {icon}
-      <span style={{ fontSize: 10, fontFamily: "var(--mono)", letterSpacing: "0.2px" }}>{label}</span>
-    </button>
   );
 }

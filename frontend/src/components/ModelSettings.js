@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from "react";
-import { Eye, EyeOff } from "lucide-react";
+import { Check, Eye, EyeOff, Plus, X } from "lucide-react";
 import { PROVIDERS, currentProvider, pushSettingsSoon, onSyncFailed, onSettingsPulled } from "../lib/api";
+import { useSyncPending } from "../lib/ui";
+import { Spinner } from "./States";
 
 const tokenKey = p => PROVIDERS[p].tokenKey;
 const modelKey = p => PROVIDERS[p].modelKey;
@@ -29,6 +31,7 @@ export default function ModelSettings() {
   const [newModelStr, setNewModelStr] = useState("");
   const [newModelName, setNewModelName] = useState("");
   const [syncFailed, setSyncFailed] = useState(false);
+  const syncPending = useSyncPending();
 
   useEffect(() => onSyncFailed(setSyncFailed), []);
 
@@ -73,23 +76,17 @@ export default function ModelSettings() {
   }
 
   return (
-    <>
-      {/* ── PROVIDER ── */}
-      <div style={{ padding: "16px 16px 0" }}>
-        <div style={{ fontSize: 12, fontFamily: "var(--mono)", color: "var(--text3)", marginBottom: 8, letterSpacing: "0.5px", textTransform: "uppercase" }}>
-          Provider
-        </div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8 }}>
+    <div className="model-settings">
+      <div className="field">
+        <div className="field-label" id="provider-label">Provider</div>
+        <div className="segmented" role="radiogroup" aria-labelledby="provider-label">
           {Object.entries(PROVIDERS).map(([id, p]) => (
             <button
               key={id}
-              className="btn btn-sm"
+              role="radio"
+              aria-checked={provider === id}
+              className={`segment${provider === id ? " is-active" : ""}`}
               onClick={() => selectProvider(id)}
-              style={{
-                background: provider === id ? "var(--accent-bg2)" : "var(--bg3)",
-                border: `1px solid ${provider === id ? "var(--accent)" : "var(--border)"}`,
-                color: provider === id ? "var(--accent)" : "var(--text2)",
-              }}
             >
               {p.label}
             </button>
@@ -97,116 +94,91 @@ export default function ModelSettings() {
         </div>
       </div>
 
-      <div style={{ height: 1, background: "var(--border)", margin: "20px 0" }} />
-
-      {/* ── TOKEN ── */}
-      <div style={{ padding: "16px 16px 0" }}>
-        <div style={{ fontSize: 12, fontFamily: "var(--mono)", color: "var(--text3)", marginBottom: 8, letterSpacing: "0.5px", textTransform: "uppercase" }}>
-          {cfg.tokenLabel}
-        </div>
-        <div style={{ position: "relative" }}>
+      <div className="field">
+        <label className="field-label" htmlFor="provider-token">{cfg.tokenLabel}</label>
+        <div className="input-wrap">
           <input
+            id="provider-token"
             key={tokenKey(provider)}
             name={tokenKey(provider)}
             autoComplete="new-password"
             data-lpignore="true"
             data-1p-ignore="true"
-            className="input"
+            className="input input-mono"
             type={showToken ? "text" : "password"}
             placeholder={cfg.tokenPlaceholder}
             value={token}
             onChange={e => { setToken(e.target.value); save(tokenKey(provider), e.target.value); }}
-            style={{ paddingRight: 44, fontFamily: "var(--mono)", fontSize: 14 }}
           />
-          <button className="btn-icon" onClick={() => setShowToken(v => !v)} style={{
-            position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)"
-          }}>
-            {showToken ? <EyeOff size={16} /> : <Eye size={16} />}
+          <button className="icon-btn" onClick={() => setShowToken(v => !v)} aria-label={showToken ? "Hide key" : "Show key"}>
+            {showToken ? <EyeOff size={17} /> : <Eye size={17} />}
           </button>
         </div>
-        <div style={{ fontSize: 12, color: "var(--text3)", marginTop: 6 }}>
-          {syncFailed
-            ? "Saved on this device, but syncing to your account failed. Retrying…"
-            : "Saved on this device and synced to your account (encrypted)."}
+        <div className={`status-line${syncFailed ? " is-warn" : ""}`} role="status">
+          {syncPending && !syncFailed ? <Spinner size={12} /> : <span className="status-line__dot" />}
+          <span>
+            {syncFailed
+              ? "Saved on this device, but syncing to your account failed. Retrying…"
+              : syncPending
+                ? "Saved on this device. Syncing to your account…"
+                : "Saved on this device and synced to your account (encrypted)."}
+          </span>
         </div>
       </div>
 
-      <div style={{ height: 1, background: "var(--border)", margin: "20px 0" }} />
-
-      {/* ── MODEL ── */}
-      <div style={{ padding: "0 16px" }}>
-        <div style={{ fontSize: 12, fontFamily: "var(--mono)", color: "var(--text3)", marginBottom: 8, letterSpacing: "0.5px", textTransform: "uppercase" }}>
-          Model
-        </div>
+      <div className="field">
+        <label className="field-label" htmlFor="provider-model">Model</label>
         <input
-          className="input"
+          id="provider-model"
+          className="input input-mono"
           placeholder={cfg.modelExample}
           value={model}
           onChange={e => { setModel(e.target.value); save(modelKey(provider), e.target.value); }}
-          style={{ fontFamily: "var(--mono)", fontSize: 14 }}
         />
-        <div style={{ fontSize: 12, color: "var(--text3)", marginTop: 6 }}>
-          {cfg.modelHint} e.g. <span style={{ color: "var(--text2)", fontFamily: "var(--mono)" }}>{cfg.modelExample}</span>
+        <div className="field-hint">
+          {cfg.modelHint}, e.g. <span className="mono">{cfg.modelExample}</span>
         </div>
       </div>
 
-      <div style={{ height: 1, background: "var(--border)", margin: "20px 0" }} />
-
-      {/* ── SAVED MODELS ── */}
-      <div style={{ padding: "16px" }}>
-        <div style={{ fontSize: 12, fontFamily: "var(--mono)", color: "var(--text3)", marginBottom: 12, letterSpacing: "0.5px", textTransform: "uppercase" }}>
-          Saved Models
-        </div>
-
-        {/* Saved model pills */}
-        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}>
-          {providerModels.length === 0 && (
-            <div style={{ fontSize: 13, color: "var(--text3)" }}>No saved models yet.</div>
-          )}
-          {providerModels.map(m => {
-            const active = model === m.model;
-            return (
-            <div key={m.index} style={{
-              display: "flex", alignItems: "center", gap: 10,
-              padding: "10px 12px", borderRadius: "var(--radius-sm)",
-              background: active ? "var(--accent-bg2)" : "var(--bg3)",
-              border: `1px solid ${active ? "var(--accent)" : "var(--border)"}`,
-              cursor: "pointer",
-            }} onClick={() => selectSavedModel(m)}>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 15, color: active ? "var(--accent)" : "var(--text)" }}>
-                  {m.name}
+      <div className="field">
+        <div className="field-label">Saved models · {cfg.label}</div>
+        {providerModels.length === 0 ? (
+          <div className="saved-empty">No saved models yet.</div>
+        ) : (
+          <div className="saved-list">
+            {providerModels.map(m => {
+              const active = model === m.model;
+              return (
+                <div key={m.index} className={`saved-item${active ? " is-active" : ""}`}>
+                  <button className="saved-item__main" onClick={() => selectSavedModel(m)} aria-pressed={active}>
+                    <span className="saved-item__check">{active && <Check size={16} />}</span>
+                    <span className="saved-item__text">
+                      <span className="saved-item__name">{m.name}</span>
+                      <span className="saved-item__model">{m.model}</span>
+                    </span>
+                  </button>
+                  <button className="icon-btn" onClick={() => removeSavedModel(m.index)} aria-label={`Remove ${m.name}`}>
+                    <X size={16} />
+                  </button>
                 </div>
-                <div style={{ fontSize: 11, fontFamily: "var(--mono)", color: "var(--text3)", marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                  {m.model}
-                </div>
-              </div>
-              <button className="btn-icon" style={{ color: "var(--text3)", flexShrink: 0 }}
-                onClick={e => { e.stopPropagation(); removeSavedModel(m.index); }}>
-                ✕
-              </button>
-            </div>
-            );
-          })}
-        </div>
+              );
+            })}
+          </div>
+        )}
 
-        {/* Add new model */}
-        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          <input className="input" placeholder="Nickname (optional) — e.g. V4 Pro"
-            value={newModelName} onChange={e => setNewModelName(e.target.value)}
-            style={{ fontSize: 15 }} />
-          <div style={{ display: "flex", gap: 8 }}>
-            <input className="input" placeholder={cfg.modelExample}
+        <div className="add-model">
+          <input className="input" placeholder="Nickname (optional), e.g. V4 Pro"
+            value={newModelName} onChange={e => setNewModelName(e.target.value)} />
+          <div className="input-row">
+            <input className="input input-mono" placeholder={cfg.modelExample}
               value={newModelStr} onChange={e => setNewModelStr(e.target.value)}
-              onKeyDown={e => e.key === "Enter" && addSavedModel()}
-              style={{ flex: 1, fontFamily: "var(--mono)", fontSize: 13 }} />
-            <button className="btn btn-primary btn-sm" onClick={addSavedModel}
-              disabled={!newModelStr.trim()}>
-              Add
+              onKeyDown={e => e.key === "Enter" && addSavedModel()} />
+            <button className="btn btn-ghost" onClick={addSavedModel} disabled={!newModelStr.trim()}>
+              <Plus size={16} /> Add
             </button>
           </div>
         </div>
       </div>
-    </>
+    </div>
   );
 }

@@ -8,6 +8,7 @@ import LoginPage from "./pages/LoginPage";
 import AIChatsPage from "./pages/AIChatsPage";
 import AIChatPage from "./pages/AIChatPage";
 import BottomNav from "./components/BottomNav";
+import { ActivityBar } from "./components/Activity";
 import { pullSettingsPersistently } from "./lib/api";
 import "./index.css";
 
@@ -30,6 +31,7 @@ export default function App() {
   return (
     <BrowserRouter>
       <div className="app-shell">
+        <ActivityBar />
         <Routes>
           <Route path="/login" element={<LoginPage />} />
           <Route path="/" element={<Navigate to="/chats" replace />} />

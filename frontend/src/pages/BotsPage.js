@@ -1,19 +1,29 @@
 import React, { useEffect, useState, useCallback } from "react";
-import { Plus, ChevronLeft, Trash2, Check } from "lucide-react";
+import { ChevronLeft, Feather, PenLine, Plus, Trash2 } from "lucide-react";
 import { api } from "../lib/api";
+import { relativeTime } from "../lib/time";
+import { useBusy, useConfirmTap } from "../lib/ui";
+import { BusyIcon, EmptyState, ErrorState, ListSkeleton, PageHeader, Spinner } from "../components/States";
 import { useToast } from "../components/Toast";
+
+const wordCount = text => (text.trim() ? text.trim().split(/\s+/).length : 0);
 
 export default function BotsPage() {
   const [bots, setBots]     = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
   const [editing, setEditing] = useState(null); // null | "new" | bot object
   const [name, setName]     = useState("");
   const [content, setContent] = useState("");
   const [saving, setSaving] = useState(false);
   const toast = useToast();
+  const [busy, runBusy] = useBusy();
+  const { armed, confirm } = useConfirmTap();
 
   const load = useCallback(async () => {
-    try { setBots(await api.getBots()); }
-    catch (e) { toast(e.message, "error"); }
+    try { setBots(await api.getBots()); setLoadError(""); }
+    catch (e) { setLoadError(e.message); toast(e.message, "error"); }
+    finally { setLoading(false); }
   }, []);
 
   useEffect(() => { load(); }, [load]);
@@ -44,28 +54,41 @@ export default function BotsPage() {
 
   // ── Editor view ──
   if (editing !== null) {
+    const isNew = editing === "new";
     return (
-      <div className="page" style={{ display: "flex", flexDirection: "column" }}>
-        <div className="page-header">
-          <button className="btn-icon" onClick={() => setEditing(null)}><ChevronLeft size={22} /></button>
-          <span className="page-title" style={{ fontSize: 18 }}>
-            {editing === "new" ? "New Bot" : "Edit Bot"}
-          </span>
-          {editing !== "new" && (
-            <button className="btn-icon" style={{ color: "var(--error)" }} onClick={() => deleteBot(editing.id)}>
-              <Trash2 size={18} />
+      <div className="page page--flex">
+        <header className="bar">
+          <div className="col bar__inner">
+            <button className="icon-btn bar__back" onClick={() => setEditing(null)} aria-label="Back to bots">
+              <ChevronLeft size={22} />
             </button>
-          )}
-          <button className="btn-icon" style={{ color: "var(--accent)" }} onClick={save} disabled={saving}>
-            <Check size={22} />
-          </button>
-        </div>
-        <div className="bot-editor" style={{ flex: 1 }}>
-          <input className="input" placeholder="Bot name…" value={name}
-            onChange={e => setName(e.target.value)} />
-          <textarea className="input" placeholder="Paste bot prompt here…" value={content}
-            onChange={e => setContent(e.target.value)}
-            style={{ flex: 1, minHeight: "60vh", fontFamily: "var(--mono)", fontSize: 14, lineHeight: 1.6 }} />
+            <div className="bar__title">
+              <div className="bar__name">{isNew ? "New character" : "Edit character"}</div>
+            </div>
+            {!isNew && (
+              <button
+                className={`btn btn-sm ${armed === editing.id ? "btn-danger is-armed" : "btn-quiet"}`}
+                onClick={() => confirm(editing.id, () => runBusy("delete", () => deleteBot(editing.id)))}
+                disabled={!!busy || saving}
+              >
+                <BusyIcon busy={busy === "delete"} Icon={Trash2} size={15} /> {busy === "delete" ? "Deleting…" : armed === editing.id ? "Confirm" : "Delete"}
+              </button>
+            )}
+            <button className="btn btn-primary btn-sm" onClick={save} disabled={saving || !!busy || !name.trim()}>
+              {saving ? <><Spinner size={13} /> Saving…</> : "Save"}
+            </button>
+          </div>
+        </header>
+        <div className="col editor">
+          <input className="title-input" placeholder="Character name" aria-label="Character name" value={name}
+            onChange={e => setName(e.target.value)} autoFocus={isNew} />
+          <textarea className="input card-textarea" aria-label="Character card"
+            placeholder="Paste or write the character card: personality, appearance, backstory, how they speak…"
+            value={content} onChange={e => setContent(e.target.value)} />
+          <div className="editor__foot">
+            <span>{content.length.toLocaleString()} characters</span>
+            <span>~{wordCount(content).toLocaleString()} words</span>
+          </div>
         </div>
       </div>
     );
@@ -74,30 +97,53 @@ export default function BotsPage() {
   // ── List view ──
   return (
     <div className="page">
-      <div className="page-header">
-        <span className="page-title">Bots</span>
-        <button className="btn-icon" onClick={openNew}><Plus size={22} /></button>
-      </div>
+      <PageHeader title="Bots" kicker={!loading && bots.length > 0 ? `${bots.length} ${bots.length === 1 ? "character" : "characters"}` : null}>
+        <button className="btn btn-ghost btn-sm" onClick={openNew}><Plus size={16} /> New character</button>
+      </PageHeader>
 
-      {bots.length === 0 && (
-        <div style={{ padding: 48, textAlign: "center", color: "var(--text3)" }}>
-          <div style={{ fontSize: 32, marginBottom: 12 }}>✦</div>
-          <div>No bots yet</div>
-          <div style={{ fontSize: 14, marginTop: 6 }}>Tap + to create your first bot</div>
-        </div>
-      )}
+      <div className="col">
+        {loading && <ListSkeleton rows={3} />}
 
-      {bots.map(b => (
-        <div key={b.id} className="chat-item" onClick={() => openEdit(b)}>
-          <div className="chat-item-info">
-            <div className="chat-item-name">{b.name}</div>
-            <div className="chat-item-sub" style={{ fontFamily: "var(--mono)" }}>
-              {b.content.slice(0, 60)}…
-            </div>
+        {!loading && loadError && bots.length === 0 && (
+          <ErrorState message={loadError} onRetry={() => { setLoading(true); load(); }} />
+        )}
+
+        {!loading && !loadError && bots.length === 0 && (
+          <EmptyState
+            icon={Feather}
+            title="No characters yet"
+            text="Write or paste a character card to start a story with them."
+            action={<button className="btn btn-primary" onClick={openNew}><Plus size={17} /> New character</button>}
+          />
+        )}
+
+        {bots.length > 0 && (
+          <div className="cards stagger">
+            {bots.map((b, i) => (
+              <article key={b.id} className="card" style={{ "--i": i }}>
+                <button className="card__main" onClick={() => openEdit(b)}>
+                  <span className="card__name">{b.name}</span>
+                  <span className="card__excerpt">{b.content || "No card text yet."}</span>
+                </button>
+                <div className="card__foot">
+                  <span className="card__meta">{wordCount(b.content).toLocaleString()} words · {relativeTime(b.updated_at)}</span>
+                  <button className="icon-btn" onClick={() => openEdit(b)} aria-label={`Edit ${b.name}`}>
+                    <PenLine size={16} />
+                  </button>
+                  <button
+                    className={armed === b.id ? "btn btn-sm btn-danger is-armed" : "icon-btn icon-btn--danger"}
+                    onClick={() => confirm(b.id, () => runBusy(`delete-${b.id}`, () => deleteBot(b.id)))}
+                    disabled={!!busy}
+                    aria-label={armed === b.id ? `Confirm delete ${b.name}` : `Delete ${b.name}`}
+                  >
+                    {armed === b.id && busy !== `delete-${b.id}` ? "Delete?" : <BusyIcon busy={busy === `delete-${b.id}`} Icon={Trash2} />}
+                  </button>
+                </div>
+              </article>
+            ))}
           </div>
-          <ChevronLeft size={16} style={{ color: "var(--text3)", transform: "rotate(180deg)" }} />
-        </div>
-      ))}
+        )}
+      </div>
     </div>
   );
 }

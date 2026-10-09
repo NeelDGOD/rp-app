@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from "react";
+import { ChevronDown } from "lucide-react";
 import BottomSheet from "./BottomSheet";
 import ModelSettings from "./ModelSettings";
 import { PROVIDERS, currentProvider, onSettingsPulled } from "../lib/api";
@@ -14,12 +15,10 @@ export default function ModelPickerButton() {
 
   return (
     <>
-      <button onClick={() => setOpen(true)} style={{
-        display: "inline-block", maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis",
-        whiteSpace: "nowrap", verticalAlign: "bottom", padding: 0, border: "none",
-        background: "none", color: "inherit", font: "inherit", cursor: "pointer",
-      }}>
-        {PROVIDERS[provider].label} · {model || "no model"}
+      <button className="model-chip" onClick={() => setOpen(true)} title="Change model and API key">
+        <span className="model-chip__dot" />
+        <span className="model-chip__text">{PROVIDERS[provider].label} · {model || "no model"}</span>
+        <ChevronDown size={12} />
       </button>
       {open && (
         <BottomSheet title="Model & API key" onClose={() => setOpen(false)}>

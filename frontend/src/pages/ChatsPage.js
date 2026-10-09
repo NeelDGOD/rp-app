@@ -1,29 +1,33 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { Plus, MoreHorizontal, Copy, Trash2, PenLine, X, Check } from "lucide-react";
+import { BookOpen, Copy, Plus, PenLine, Trash2 } from "lucide-react";
 import { api } from "../lib/api";
-import { useSlowLoad } from "../lib/useSlowLoad";
+import { useBusy, useConfirmTap } from "../lib/ui";
 import BottomSheet from "../components/BottomSheet";
+import ChatList from "../components/ChatList";
+import { BusyIcon, EmptyState, ErrorState, ListSkeleton, PageHeader, Spinner } from "../components/States";
 import { useToast } from "../components/Toast";
 
 export default function ChatsPage() {
   const [chats, setChats] = useState([]);
   const [bots, setBots]   = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
   const [sheet, setSheet] = useState(null); // "new" | {chat}
   const [newName, setNewName] = useState("");
   const [newBot, setNewBot]   = useState("");
   const [renameVal, setRenameVal] = useState("");
   const nav   = useNavigate();
   const toast = useToast();
-  const slowLoad = useSlowLoad(loading);
+  const { armed, confirm } = useConfirmTap();
+  const [busy, runBusy] = useBusy();
 
   const load = useCallback(async () => {
     try {
       const [c, b] = await Promise.all([api.getChats(), api.getBots()]);
-      setChats(c); setBots(b);
+      setChats(c); setBots(b); setLoadError("");
       if (b.length && !newBot) setNewBot(b[0].id);
-    } catch (e) { toast(e.message, "error"); }
+    } catch (e) { setLoadError(e.message); toast(e.message, "error"); }
     finally { setLoading(false); }
   }, []);
 
@@ -54,92 +58,93 @@ export default function ChatsPage() {
     catch (e) { toast(e.message, "error"); }
   }
 
+  const openNew = () => { setNewName(""); setSheet("new"); };
+  const botName = id => bots.find(b => b.id === id)?.name || "Unknown bot";
+  const create = () => runBusy("create", createChat);
+  const rename = id => runBusy("rename", () => renameChat(id));
+
   return (
     <div className="page">
-      <div className="page-header">
-        <span className="page-title">Chats</span>
-        <button className="btn-icon" onClick={() => { setNewName(""); setSheet("new"); }}>
-          <Plus size={22} />
-        </button>
+      <PageHeader title="Chats" kicker={!loading && chats.length > 0 ? `${chats.length} ${chats.length === 1 ? "story" : "stories"}` : null}>
+        <button className="btn btn-ghost btn-sm" onClick={openNew}><Plus size={16} /> New chat</button>
+      </PageHeader>
+
+      <div className="col">
+        {loading && <ListSkeleton />}
+
+        {!loading && loadError && chats.length === 0 && (
+          <ErrorState message={loadError} onRetry={() => { setLoading(true); load(); }} />
+        )}
+
+        {!loading && !loadError && chats.length === 0 && (
+          <EmptyState
+            icon={BookOpen}
+            title="No stories yet"
+            text="Pick a character and open the first page."
+            action={<button className="btn btn-primary" onClick={openNew}><Plus size={17} /> New chat</button>}
+          />
+        )}
+
+        {!loading && chats.length > 0 && (
+          <ChatList
+            chats={chats}
+            metaFor={c => botName(c.bot_id)}
+            onOpen={c => nav(`/chats/${c.id}`)}
+            onMore={c => { setRenameVal(c.name); setSheet(c); }}
+          />
+        )}
       </div>
 
-      {loading && (
-        <div style={{ padding: 32, textAlign: "center", color: "var(--text3)" }}>
-          Loading…
-          {slowLoad && (
-            <div style={{ marginTop: 8, fontSize: 13 }}>
-              ⚡ Waking up the server — this can take up to a minute on the free tier.
-            </div>
-          )}
-        </div>
-      )}
-
-      {!loading && chats.length === 0 && (
-        <div style={{ padding: 48, textAlign: "center", color: "var(--text3)" }}>
-          <div style={{ fontSize: 32, marginBottom: 12 }}>✦</div>
-          <div>No chats yet</div>
-          <div style={{ fontSize: 14, marginTop: 6 }}>Tap + to start a new one</div>
-        </div>
-      )}
-
-      {chats.map(c => {
-        const bot = bots.find(b => b.id === c.bot_id);
-        return (
-          <div key={c.id} className="chat-item" onClick={() => nav(`/chats/${c.id}`)}>
-            <div className="chat-item-info">
-              <div className="chat-item-name">{c.name}</div>
-              <div className="chat-item-sub">{bot?.name || "Unknown bot"}</div>
-            </div>
-            <button className="btn-icon" onClick={e => { e.stopPropagation(); setRenameVal(c.name); setSheet(c); }}>
-              <MoreHorizontal size={18} />
-            </button>
-          </div>
-        );
-      })}
-
-      {/* New chat sheet */}
       {sheet === "new" && (
-        <BottomSheet title="New Chat" onClose={() => setSheet(null)}>
-          <input className="input" placeholder="Chat name…" value={newName}
-            onChange={e => setNewName(e.target.value)}
-            onKeyDown={e => e.key === "Enter" && createChat()} autoFocus />
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            <div style={{ fontSize: 13, color: "var(--text3)", fontFamily: "var(--mono)" }}>Select bot</div>
-            {bots.map(b => (
-              <button key={b.id} onClick={() => setNewBot(b.id)} style={{
-                padding: "11px 14px", borderRadius: "var(--radius-sm)", border: "1px solid",
-                borderColor: newBot === b.id ? "var(--accent)" : "var(--border)",
-                background: newBot === b.id ? "var(--accent-bg)" : "var(--bg3)",
-                color: newBot === b.id ? "var(--accent)" : "var(--text)",
-                textAlign: "left", cursor: "pointer", fontFamily: "var(--font)", fontSize: 16,
-              }}>{b.name}</button>
-            ))}
-            {bots.length === 0 && <div style={{ color: "var(--text3)", fontSize: 14 }}>No bots yet — create one in the Bots tab first.</div>}
+        <BottomSheet title="New chat" onClose={() => setSheet(null)}>
+          <div className="field">
+            <label className="field-label" htmlFor="new-chat-name">Title</label>
+            <input id="new-chat-name" className="input" placeholder="e.g. The fourth floor" value={newName}
+              onChange={e => setNewName(e.target.value)}
+              onKeyDown={e => e.key === "Enter" && create()} autoFocus />
           </div>
-          <button className="btn btn-primary" style={{ width: "100%" }} onClick={createChat}
-            disabled={!newName.trim() || !newBot}>
-            Create Chat
+          <div className="field">
+            <div className="field-label" id="new-chat-bot">Character</div>
+            {bots.length === 0 ? (
+              <div className="sheet-note">No bots yet. Create one in the Bots tab first.</div>
+            ) : (
+              <div className="option-list" role="radiogroup" aria-labelledby="new-chat-bot">
+                {bots.map(b => (
+                  <button key={b.id} role="radio" aria-checked={newBot === b.id}
+                    className={`option${newBot === b.id ? " is-active" : ""}`} onClick={() => setNewBot(b.id)}>
+                    <span className="option__mark" />
+                    <span className="option__body"><span className="option__title">{b.name}</span></span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+          <button className="btn btn-primary btn-block" onClick={create} disabled={!newName.trim() || !newBot || busy === "create"}>
+            {busy === "create" ? <><Spinner /> Creating…</> : "Begin"}
           </button>
         </BottomSheet>
       )}
 
-      {/* Chat options sheet */}
       {sheet && sheet !== "new" && (
         <BottomSheet title={sheet.name} onClose={() => setSheet(null)}>
-          <input className="input" placeholder="Rename…" value={renameVal}
-            onChange={e => setRenameVal(e.target.value)} />
-          <button className="btn btn-ghost" style={{ width: "100%", justifyContent: "flex-start", gap: 10 }}
-            onClick={() => renameChat(sheet.id)}>
-            <PenLine size={16} /> Rename
-          </button>
-          <button className="btn btn-ghost" style={{ width: "100%", justifyContent: "flex-start", gap: 10 }}
-            onClick={() => cloneChat(sheet.id, sheet.name)}>
-            <Copy size={16} /> Clone
-          </button>
-          <button className="btn btn-danger" style={{ width: "100%", justifyContent: "flex-start", gap: 10 }}
-            onClick={() => deleteChat(sheet.id)}>
-            <Trash2 size={16} /> Delete
-          </button>
+          <div className="input-row">
+            <input className="input" aria-label="New name" placeholder="Rename…" value={renameVal}
+              onChange={e => setRenameVal(e.target.value)}
+              onKeyDown={e => e.key === "Enter" && rename(sheet.id)} />
+            <button className="btn btn-ghost" onClick={() => rename(sheet.id)} disabled={!renameVal.trim() || !!busy}>
+              <BusyIcon busy={busy === "rename"} Icon={PenLine} /> Rename
+            </button>
+          </div>
+          <div className="action-list">
+            <button className="action" disabled={!!busy} onClick={() => runBusy("clone", () => cloneChat(sheet.id, sheet.name))}>
+              <BusyIcon busy={busy === "clone"} Icon={Copy} size={18} /> {busy === "clone" ? "Cloning…" : "Clone this chat"}
+            </button>
+            <button className={`action action--danger${armed === sheet.id ? " is-armed" : ""}`} disabled={!!busy}
+              onClick={() => confirm(sheet.id, () => runBusy("delete", () => deleteChat(sheet.id)))}>
+              <BusyIcon busy={busy === "delete"} Icon={Trash2} size={18} />
+              {busy === "delete" ? "Deleting…" : armed === sheet.id ? "Tap again to delete for good" : "Delete chat"}
+            </button>
+          </div>
         </BottomSheet>
       )}
     </div>
