@@ -29,6 +29,9 @@ PUTER_URL = "https://api.puter.com/drivers/call"
 # spent) must fail fast so the fallback chain can take over.
 LLM_TIMEOUT = 60
 LLM_MAX_RETRIES = 1
+# Puter's free queue can stay silent for 30s+ before the first token, and a full
+# memory document takes ~40s when it isn't streamed, so it gets a longer read limit.
+PUTER_TIMEOUT = httpx.Timeout(LLM_TIMEOUT, read=120)
 MAX_CONTEXT   = 20
 MEM_INTERVAL  = 6
 EMBED_MODEL   = "gemini-embedding-001"
@@ -418,13 +421,13 @@ class PuterClient:
         headers = {"Content-Type": "text/plain;actually=json"}
         if stream:
             return self._stream(body, headers)
-        r = httpx.post(PUTER_URL, content=body, headers=headers, timeout=LLM_TIMEOUT)
+        r = httpx.post(PUTER_URL, content=body, headers=headers, timeout=PUTER_TIMEOUT)
         self._check(r)
         content = r.json()["result"]["message"]["content"]
         return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
 
     def _stream(self, body: str, headers: dict):
-        with httpx.stream("POST", PUTER_URL, content=body, headers=headers, timeout=LLM_TIMEOUT) as r:
+        with httpx.stream("POST", PUTER_URL, content=body, headers=headers, timeout=PUTER_TIMEOUT) as r:
             if r.status_code != 200:
                 r.read()
                 self._check(r)
