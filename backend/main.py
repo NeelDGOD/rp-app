@@ -103,6 +103,7 @@ TABLE_COLS = {
     "ai_chats": ["id", "name", "history", "created_at", "updated_at", "user_id"],
     "user_settings": ["user_id", "data"],
     "api_errors": ["id", "user_id", "created_at", "kind", "provider", "model", "message", "fell_back"],
+    "chat_active_branch": ["chat_id", "branch_id"],
 }
 
 def rows(conn, sql, params=(), cols=None):
@@ -182,6 +183,9 @@ def init_db():
             message TEXT NOT NULL, fell_back INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_api_errors_user ON api_errors(user_id, created_at);
+        CREATE TABLE IF NOT EXISTS chat_active_branch (
+            chat_id TEXT PRIMARY KEY, branch_id TEXT NOT NULL
+        );
     """)
     conn.commit()
     conn.close()
@@ -695,6 +699,41 @@ def save_branch(branch_id: str, history: list, memory: str, turns: int, director
     db_write("UPDATE branches SET history=?,memory=?,turn_counter=?,director_note=?,updated_at=? WHERE id=?",
              (json.dumps(history), memory, turns, director_note, ts(), branch_id))
 
+# A branch is saved as one row, and several requests can touch it at once (a memory update
+# that takes a minute, new messages, undo). Every read-modify-write on a branch happens under
+# its lock and re-reads the row first, so a slow request can never write back a stale copy and
+# erase what other requests saved in the meantime. One uvicorn worker, so a process lock suffices.
+_branch_locks: dict = {}
+_branch_locks_guard = threading.Lock()
+
+def branch_lock(branch_id: str) -> threading.Lock:
+    with _branch_locks_guard:
+        return _branch_locks.setdefault(branch_id, threading.Lock())
+
+def commit_turn(branch_id: str, system_msg: dict, turn_msgs: list, director_note: Optional[str] = None) -> int:
+    """Append one finished turn to the branch's current saved state; returns the new turn counter.
+    director_note=None keeps whatever is saved (only a {direct:}/{normal} command in this very
+    message may change it)."""
+    with branch_lock(branch_id):
+        fresh = get_branch_data(branch_id)
+        history = fresh["history"]
+        if history:
+            history[0] = system_msg
+        else:
+            history = [system_msg]
+        turns = fresh["turn_counter"] + 1
+        save_branch(branch_id, history + turn_msgs, fresh["memory"], turns,
+                    fresh["director_note"] if director_note is None else director_note)
+    return turns
+
+def set_active_branch(chat_id: str, branch_id: str):
+    """Remember which version of a chat the user was last on, so reopening it lands there."""
+    db_write("INSERT OR REPLACE INTO chat_active_branch VALUES (?,?)", (chat_id, branch_id))
+
+def save_memory(branch_id: str, memory: str, director_note: str):
+    """Memory updates own only these two columns; history, turn counter and updated_at stay as they are."""
+    db_write("UPDATE branches SET memory=?,director_note=? WHERE id=?", (memory, director_note, branch_id))
+
 def get_bot(bot_id: str, conn=None, user_id: str = None) -> dict:
     close = conn is None
     if close: conn = get_db()
@@ -787,10 +826,26 @@ def get_chat(chat_id: str, user_id: str = Depends(require_user)):
     conn = get_db()
     c = chat_owned(chat_id, user_id, conn)
     bs = rows(conn, "SELECT * FROM branches WHERE chat_id=? ORDER BY created_at", (chat_id,), cols=TABLE_COLS["branches"])
+    active = row(conn, "SELECT * FROM chat_active_branch WHERE chat_id=?", (chat_id,), cols=TABLE_COLS["chat_active_branch"])
     conn.close()
     for b in bs: b["history"] = json.loads(b["history"])
     c["branches"] = bs
+    c["active_branch_id"] = active["branch_id"] if active and any(b["id"] == active["branch_id"] for b in bs) else None
     return c
+
+class ActiveBranch(BaseModel):
+    branch_id: str
+
+@app.put("/chats/{chat_id}/active-branch")
+def put_active_branch(chat_id: str, data: ActiveBranch, user_id: str = Depends(require_user)):
+    conn = get_db()
+    chat_owned(chat_id, user_id, conn)
+    b = row(conn, "SELECT id FROM branches WHERE id=? AND chat_id=?", (data.branch_id, chat_id), cols=["id"])
+    conn.close()
+    if not b:
+        raise HTTPException(404, "Branch not found")
+    set_active_branch(chat_id, data.branch_id)
+    return {"ok": True}
 
 @app.put("/chats/{chat_id}/rename")
 def rename_chat(chat_id: str, data: Rename, user_id: str = Depends(require_user)):
@@ -801,7 +856,7 @@ def rename_chat(chat_id: str, data: Rename, user_id: str = Depends(require_user)
 @app.delete("/chats/{chat_id}")
 def delete_chat(chat_id: str, user_id: str = Depends(require_user)):
     conn = get_db(); chat_owned(chat_id, user_id, conn)
-    for tbl in ("bookmarks", "branches", "chats"):
+    for tbl in ("bookmarks", "branches", "chat_active_branch", "chats"):
         q(conn, f"DELETE FROM {tbl} WHERE {'chat_id' if tbl!='chats' else 'id'}=?", (chat_id,))
     conn.commit(); conn.close(); return {"ok": True}
 
@@ -817,6 +872,9 @@ def clone_chat(chat_id: str, data: Rename, user_id: str = Depends(require_user))
         np = id_map.get(b["parent_branch_id"]) if b["parent_branch_id"] else ""
         q(conn, "INSERT INTO branches VALUES (?,?,?,?,?,?,?,?,?,?)",
           (id_map[b["id"]], new_cid, np, b["fork_message_index"], b["history"], b["memory"], b["turn_counter"], n, n, b["director_note"]))
+    old_active = row(conn, "SELECT * FROM chat_active_branch WHERE chat_id=?", (chat_id,), cols=TABLE_COLS["chat_active_branch"])
+    if old_active and old_active["branch_id"] in id_map:
+        q(conn, "INSERT OR REPLACE INTO chat_active_branch VALUES (?,?)", (new_cid, id_map[old_active["branch_id"]]))
     conn.commit(); conn.close()
     return {"id": new_cid, "name": data.name}
 
@@ -838,6 +896,8 @@ async def send_message(chat_id: str, data: SendMsg,
         b["history"] = [sys_msg(bot["content"])]
     else:
         b["history"][0] = sys_msg(bot["content"])
+
+    note_before = b["director_note"]
 
     cmds = re.findall(r"{([^}]+)}", data.content)
     cleaned = re.sub(r"{[^}]+}", "", data.content).strip()
@@ -894,12 +954,14 @@ async def send_message(chat_id: str, data: SendMsg,
                 if delta:
                     full += delta
                     yield f"data: {json.dumps({'type':'delta','content':delta})}\n\n"
-            b["history"].append({"role": "assistant", "content": full, "model": reply.model})
-            b["turn_counter"] += 1
-            needs_mem = b["turn_counter"] % MEM_INTERVAL == 0
-            save_branch(data.branch_id, b["history"], b["memory"], b["turn_counter"], b["director_note"])
+            turn_counter = commit_turn(
+                data.branch_id, sys_msg(bot["content"]),
+                [{"role": "user", "content": cleaned}, {"role": "assistant", "content": full, "model": reply.model}],
+                b["director_note"] if b["director_note"] != note_before else None)
+            needs_mem = turn_counter % MEM_INTERVAL == 0
             touch_chat(chat_id)
-            yield f"data: {json.dumps({'type':'done','needs_memory':needs_mem,'turn_counter':b['turn_counter']})}\n\n"
+            set_active_branch(chat_id, data.branch_id)
+            yield f"data: {json.dumps({'type':'done','needs_memory':needs_mem,'turn_counter':turn_counter})}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'type':'error','message':str(e)})}\n\n"
 
@@ -944,6 +1006,7 @@ async def retry_message(chat_id: str, data: RetryMsg,
                 q(conn, "UPDATE chats SET updated_at=? WHERE id=?", (ts(), chat_id))
                 conn.commit(); conn.close()
             with_db_retry(_persist)
+            set_active_branch(chat_id, new_bid)
             yield f"data: {json.dumps({'type':'done','branch_id':new_bid,'needs_memory':needs_mem})}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'type':'error','message':str(e)})}\n\n"
@@ -954,14 +1017,15 @@ async def retry_message(chat_id: str, data: RetryMsg,
 @app.post("/branches/{branch_id}/undo")
 def undo(branch_id: str, user_id: str = Depends(require_user)):
     branch_owned(branch_id, user_id)
-    b = get_branch_data(branch_id)
-    h = b["history"]
-    if len(h) > 2:
-        if h[-1]["role"] == "assistant": h.pop()
-        if h and h[-1]["role"] == "user": h.pop()
-        if h and h[-1]["role"] == "system" and "COMMAND OVERRIDE" in h[-1].get("content", ""): h.pop()
-    turns = max(0, b["turn_counter"] - 1)
-    save_branch(branch_id, h, b["memory"], turns, b["director_note"])
+    with branch_lock(branch_id):
+        b = get_branch_data(branch_id)
+        h = b["history"]
+        if len(h) > 2:
+            if h[-1]["role"] == "assistant": h.pop()
+            if h and h[-1]["role"] == "user": h.pop()
+            if h and h[-1]["role"] == "system" and "COMMAND OVERRIDE" in h[-1].get("content", ""): h.pop()
+        turns = max(0, b["turn_counter"] - 1)
+        save_branch(branch_id, h, b["memory"], turns, b["director_note"])
     return {"ok": True, "history": h}
 
 # ── MEMORY ────────────────────────────────────────────────────────────────────
@@ -973,7 +1037,10 @@ def update_memory(branch_id: str, llm: list = Depends(llm_candidates),
     b = get_branch_data(branch_id)
     try:
         new_mem, new_note = do_memory_update(b["history"], b["memory"], llm, user_id, b["director_note"])
-        save_branch(branch_id, b["history"], new_mem, b["turn_counter"], new_note)
+        with branch_lock(branch_id):
+            fresh = get_branch_data(branch_id)
+            new_note = new_note if fresh["director_note"] == b["director_note"] else fresh["director_note"]
+            save_memory(branch_id, new_mem, new_note)
         if x_use_rag.lower() == "true" and x_embed_token:
             # The memory document above is already saved — a broken/unauthorized
             # embed token must not turn this into a reported failure.
@@ -1013,6 +1080,7 @@ def restore_bookmark(bookmark_id: str, user_id: str = Depends(require_user)):
     q(conn, "INSERT INTO branches VALUES (?,?,?,?,?,?,?,?,?,?)",
       (new_bid, bm["chat_id"], "", 0, bm["history"], bm["memory"], bm["turn_counter"], n, n, ""))
     conn.commit(); conn.close()
+    set_active_branch(bm["chat_id"], new_bid)
     return {"branch_id": new_bid}
 
 @app.delete("/bookmarks/{bookmark_id}")
@@ -1029,15 +1097,16 @@ class EditMessage(BaseModel):
 @app.post("/branches/{branch_id}/edit-message")
 def edit_message(branch_id: str, data: EditMessage, user_id: str = Depends(require_user)):
     branch_owned(branch_id, user_id)
-    b = get_branch_data(branch_id)
-    h = b["history"]
-    # Get visible messages with their actual history indices
-    visible_indices = [i for i, m in enumerate(h) if m["role"] in ("user", "assistant")]
-    if data.visible_index >= len(visible_indices):
-        raise HTTPException(400, "Message index out of range")
-    actual_index = visible_indices[data.visible_index]
-    h[actual_index]["content"] = data.new_content
-    save_branch(branch_id, h, b["memory"], b["turn_counter"], b["director_note"])
+    with branch_lock(branch_id):
+        b = get_branch_data(branch_id)
+        h = b["history"]
+        # Get visible messages with their actual history indices
+        visible_indices = [i for i, m in enumerate(h) if m["role"] in ("user", "assistant")]
+        if data.visible_index >= len(visible_indices):
+            raise HTTPException(400, "Message index out of range")
+        actual_index = visible_indices[data.visible_index]
+        h[actual_index]["content"] = data.new_content
+        save_branch(branch_id, h, b["memory"], b["turn_counter"], b["director_note"])
     return {"ok": True, "history": h}
 
 
@@ -1092,6 +1161,7 @@ async def edit_user_message(chat_id: str, data: EditUserMsg,
                 q(conn, "UPDATE chats SET updated_at=? WHERE id=?", (ts(), chat_id))
                 conn.commit(); conn.close()
             with_db_retry(_persist)
+            set_active_branch(chat_id, new_bid)
             yield f"data: {json.dumps({'type':'done','branch_id':new_bid,'needs_memory':needs_mem})}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'type':'error','message':str(e)})}\n\n"

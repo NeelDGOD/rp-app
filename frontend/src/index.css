@@ -569,6 +569,7 @@ textarea.input { resize: none; display: block; }
 .versions__count { padding: 0 2px; }
 .versions__count b { color: var(--text2); font-weight: 500; }
 .versions__label { margin-left: 10px; font-family: var(--sans); font-size: 11px; letter-spacing: .1em; text-transform: uppercase; }
+.futures-hint { margin: 8px 0 2px; }
 
 .thinking { display: flex; align-items: center; gap: 6px; height: 1.7em; font-size: var(--prose-size, 17px); }
 .thinking i { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); opacity: .25; animation: think 1.4s ease-in-out infinite; }
