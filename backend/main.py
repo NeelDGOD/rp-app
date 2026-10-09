@@ -103,6 +103,7 @@ TABLE_COLS = {
     "ai_chats": ["id", "name", "history", "created_at", "updated_at", "user_id"],
     "user_settings": ["user_id", "data"],
     "api_errors": ["id", "user_id", "created_at", "kind", "provider", "model", "message", "fell_back"],
+    "chat_active_branch": ["chat_id", "branch_id"],
 }
 
 def rows(conn, sql, params=(), cols=None):
@@ -182,6 +183,9 @@ def init_db():
             message TEXT NOT NULL, fell_back INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_api_errors_user ON api_errors(user_id, created_at);
+        CREATE TABLE IF NOT EXISTS chat_active_branch (
+            chat_id TEXT PRIMARY KEY, branch_id TEXT NOT NULL
+        );
     """)
     conn.commit()
     conn.close()
@@ -722,6 +726,10 @@ def commit_turn(branch_id: str, system_msg: dict, turn_msgs: list, director_note
                     fresh["director_note"] if director_note is None else director_note)
     return turns
 
+def set_active_branch(chat_id: str, branch_id: str):
+    """Remember which version of a chat the user was last on, so reopening it lands there."""
+    db_write("INSERT OR REPLACE INTO chat_active_branch VALUES (?,?)", (chat_id, branch_id))
+
 def save_memory(branch_id: str, memory: str, director_note: str):
     """Memory updates own only these two columns; history, turn counter and updated_at stay as they are."""
     db_write("UPDATE branches SET memory=?,director_note=? WHERE id=?", (memory, director_note, branch_id))
@@ -818,10 +826,26 @@ def get_chat(chat_id: str, user_id: str = Depends(require_user)):
     conn = get_db()
     c = chat_owned(chat_id, user_id, conn)
     bs = rows(conn, "SELECT * FROM branches WHERE chat_id=? ORDER BY created_at", (chat_id,), cols=TABLE_COLS["branches"])
+    active = row(conn, "SELECT * FROM chat_active_branch WHERE chat_id=?", (chat_id,), cols=TABLE_COLS["chat_active_branch"])
     conn.close()
     for b in bs: b["history"] = json.loads(b["history"])
     c["branches"] = bs
+    c["active_branch_id"] = active["branch_id"] if active and any(b["id"] == active["branch_id"] for b in bs) else None
     return c
+
+class ActiveBranch(BaseModel):
+    branch_id: str
+
+@app.put("/chats/{chat_id}/active-branch")
+def put_active_branch(chat_id: str, data: ActiveBranch, user_id: str = Depends(require_user)):
+    conn = get_db()
+    chat_owned(chat_id, user_id, conn)
+    b = row(conn, "SELECT id FROM branches WHERE id=? AND chat_id=?", (data.branch_id, chat_id), cols=["id"])
+    conn.close()
+    if not b:
+        raise HTTPException(404, "Branch not found")
+    set_active_branch(chat_id, data.branch_id)
+    return {"ok": True}
 
 @app.put("/chats/{chat_id}/rename")
 def rename_chat(chat_id: str, data: Rename, user_id: str = Depends(require_user)):
@@ -832,7 +856,7 @@ def rename_chat(chat_id: str, data: Rename, user_id: str = Depends(require_user)
 @app.delete("/chats/{chat_id}")
 def delete_chat(chat_id: str, user_id: str = Depends(require_user)):
     conn = get_db(); chat_owned(chat_id, user_id, conn)
-    for tbl in ("bookmarks", "branches", "chats"):
+    for tbl in ("bookmarks", "branches", "chat_active_branch", "chats"):
         q(conn, f"DELETE FROM {tbl} WHERE {'chat_id' if tbl!='chats' else 'id'}=?", (chat_id,))
     conn.commit(); conn.close(); return {"ok": True}
 
@@ -848,6 +872,9 @@ def clone_chat(chat_id: str, data: Rename, user_id: str = Depends(require_user))
         np = id_map.get(b["parent_branch_id"]) if b["parent_branch_id"] else ""
         q(conn, "INSERT INTO branches VALUES (?,?,?,?,?,?,?,?,?,?)",
           (id_map[b["id"]], new_cid, np, b["fork_message_index"], b["history"], b["memory"], b["turn_counter"], n, n, b["director_note"]))
+    old_active = row(conn, "SELECT * FROM chat_active_branch WHERE chat_id=?", (chat_id,), cols=TABLE_COLS["chat_active_branch"])
+    if old_active and old_active["branch_id"] in id_map:
+        q(conn, "INSERT OR REPLACE INTO chat_active_branch VALUES (?,?)", (new_cid, id_map[old_active["branch_id"]]))
     conn.commit(); conn.close()
     return {"id": new_cid, "name": data.name}
 
@@ -933,6 +960,7 @@ async def send_message(chat_id: str, data: SendMsg,
                 b["director_note"] if b["director_note"] != note_before else None)
             needs_mem = turn_counter % MEM_INTERVAL == 0
             touch_chat(chat_id)
+            set_active_branch(chat_id, data.branch_id)
             yield f"data: {json.dumps({'type':'done','needs_memory':needs_mem,'turn_counter':turn_counter})}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'type':'error','message':str(e)})}\n\n"
@@ -978,6 +1006,7 @@ async def retry_message(chat_id: str, data: RetryMsg,
                 q(conn, "UPDATE chats SET updated_at=? WHERE id=?", (ts(), chat_id))
                 conn.commit(); conn.close()
             with_db_retry(_persist)
+            set_active_branch(chat_id, new_bid)
             yield f"data: {json.dumps({'type':'done','branch_id':new_bid,'needs_memory':needs_mem})}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'type':'error','message':str(e)})}\n\n"
@@ -1051,6 +1080,7 @@ def restore_bookmark(bookmark_id: str, user_id: str = Depends(require_user)):
     q(conn, "INSERT INTO branches VALUES (?,?,?,?,?,?,?,?,?,?)",
       (new_bid, bm["chat_id"], "", 0, bm["history"], bm["memory"], bm["turn_counter"], n, n, ""))
     conn.commit(); conn.close()
+    set_active_branch(bm["chat_id"], new_bid)
     return {"branch_id": new_bid}
 
 @app.delete("/bookmarks/{bookmark_id}")
@@ -1131,6 +1161,7 @@ async def edit_user_message(chat_id: str, data: EditUserMsg,
                 q(conn, "UPDATE chats SET updated_at=? WHERE id=?", (ts(), chat_id))
                 conn.commit(); conn.close()
             with_db_retry(_persist)
+            set_active_branch(chat_id, new_bid)
             yield f"data: {json.dumps({'type':'done','branch_id':new_bid,'needs_memory':needs_mem})}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'type':'error','message':str(e)})}\n\n"
