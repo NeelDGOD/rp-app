@@ -445,7 +445,11 @@ class PuterClient:
     def _check(r):
         if r.status_code != 200:
             try:
-                message = r.json()["message"]
+                body = r.json()
+                message = body["message"]
+                reasons = "; ".join(a.get("upstreamMessage") or a.get("error", "") for a in body.get("attempts", []))
+                if reasons:
+                    message += f" ({reasons})"
             except Exception:
                 message = r.text[:200]
             raise RuntimeError(f"Puter error {r.status_code}: {message}")
