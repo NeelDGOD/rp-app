@@ -384,7 +384,9 @@ def build_send_history(history: list, memory: str, resume: Optional[dict] = None
 def get_client(provider: str, token: str, model: str):
     """Return (chat client, model id) for the requested provider. Every provider
     in OPENAI_COMPAT_BASE_URLS takes the model id as-is via its OpenAI-compatible API."""
-    return OpenAI(api_key=token, base_url=OPENAI_COMPAT_BASE_URLS[provider],
+    # A pasted key often carries a trailing space/newline, which the HTTP layer
+    # rejects and the OpenAI client reports only as a bare "Connection error.".
+    return OpenAI(api_key=token.strip(), base_url=OPENAI_COMPAT_BASE_URLS[provider],
                   timeout=LLM_TIMEOUT, max_retries=LLM_MAX_RETRIES), model
     # Hugging Face (disabled: free accounts no longer get Inference Providers credits).
     # "huggingface" expects a "repo_id:provider" model string as copied from HF's model page.
@@ -525,7 +527,7 @@ EMOTIONAL STATE:{directive_block}"""},
 def embed_text(text: str, token: str, task: str) -> list:
     r = httpx.post(
         f"https://generativelanguage.googleapis.com/v1beta/models/{EMBED_MODEL}:embedContent",
-        headers={"x-goog-api-key": token},
+        headers={"x-goog-api-key": token.strip()},
         json={"content": {"parts": [{"text": text}]}, "taskType": task, "outputDimensionality": EMBED_DIMS},
         timeout=30,
     )
