@@ -227,6 +227,7 @@ export const api = {
   getChats: () => request("GET", "/chats"),
   createChat: (data) => request("POST", "/chats", data),
   getChat: (id) => request("GET", `/chats/${id}`),
+  setActiveBranch: (chatId, branchId) => request("PUT", `/chats/${chatId}/active-branch`, { branch_id: branchId }),
   renameChat: (id, name) => request("PUT", `/chats/${id}/rename`, { name }),
   deleteChat: (id) => request("DELETE", `/chats/${id}`),
   cloneChat: (id, name) => request("POST", `/chats/${id}/clone`, { name }),

@@ -11,6 +11,7 @@ import { api } from "../lib/api";
 import { useSlowLoad } from "../lib/useSlowLoad";
 import BottomSheet from "../components/BottomSheet";
 import { useToast } from "../components/Toast";
+import { buildVersionMap, buildFutures } from "../lib/branches";
 import ModelPickerButton from "../components/ModelPickerButton";
 
 const COMMANDS_REF = `GENERAL
@@ -38,71 +39,6 @@ TYPE /commands anytime to see this again`;
 
 function visibleMessages(branch) {
   return branch.history.filter(m => m.role === "user" || m.role === "assistant");
-}
-
-// ── BRANCH FORK MAP ──────────────────────────────────────────────────────────
-// Groups branches into "fork clusters" — sets of branches that are alternate
-// versions of the same reply/edit. A retry chain (branch1 → branch2 → branch3,
-// each parented to the previous) all share the same fork_message_index, so we
-// walk each branch's parent_branch_id chain back to the true common ancestor
-// ("anchor") instead of trusting the raw index number alone. That number is
-// just an array-length int — two *unrelated* fork points (e.g. a retry at one
-// spot and an edited message at a different spot) can coincidentally produce
-// the same value, which would wrongly merge them if we grouped by number alone.
-// Keying by (anchor id + fork index) instead makes that collision impossible.
-// Returns Map<visibleMsgIndex, branch[]> — only entries with 2+ versions.
-function buildForkMap(activeBranch, allBranches) {
-  const forkMap = new Map();
-  if (!activeBranch || allBranches.length <= 1) return forkMap;
-
-  const byId = new Map(allBranches.map(b => [b.id, b]));
-
-  // Walk up the parent chain while the fork index stays the same — that's
-  // still the same fork cluster (e.g. retry chains). Stop at the branch whose
-  // parent has a *different* fork index (or no parent) — that parent is the
-  // true anchor all versions in this cluster diverged from.
-  function findAnchor(branch) {
-    let current = branch;
-    while (current.parent_branch_id) {
-      const parent = byId.get(current.parent_branch_id);
-      if (!parent || parent.fork_message_index !== branch.fork_message_index) break;
-      current = parent;
-    }
-    return current.parent_branch_id ? byId.get(current.parent_branch_id) : current;
-  }
-
-  const clusters = new Map(); // "anchorId:fmi" → { anchor, fmi, members: [] }
-  allBranches.forEach(b => {
-    if (!b.parent_branch_id) return; // root branch, not a forked child
-    const anchor = findAnchor(b);
-    if (!anchor) return;
-    const key = `${anchor.id}:${b.fork_message_index}`;
-    if (!clusters.has(key)) clusters.set(key, { anchor, fmi: b.fork_message_index, members: [] });
-    clusters.get(key).members.push(b);
-  });
-
-  // Lookup: full history index → visible message index, for the active branch
-  const h = activeBranch.history;
-  const fullToVisible = {};
-  let visCount = 0;
-  h.forEach((m, i) => {
-    if (m.role === "user" || m.role === "assistant") {
-      fullToVisible[i] = visCount++;
-    }
-  });
-
-  clusters.forEach(({ anchor, fmi, members }) => {
-    const visIdx = fullToVisible[fmi];
-    if (visIdx === undefined) return;
-
-    const allAtFork = [anchor, ...members];
-    const isRelevant = allAtFork.some(b => b.id === activeBranch.id);
-    if (isRelevant) {
-      forkMap.set(visIdx, allAtFork);
-    }
-  });
-
-  return forkMap;
 }
 
 export default function ChatPage() {
@@ -144,6 +80,8 @@ export default function ChatPage() {
           const stillExists = branches.find(b => b.id === prev.id);
           if (stillExists) return stillExists;
         }
+        const remembered = branches.find(b => b.id === data.active_branch_id);
+        if (remembered) return remembered;
         const sorted = [...branches].sort((a, b) => b.updated_at > a.updated_at ? 1 : -1);
         return sorted[0];
       });
@@ -175,6 +113,7 @@ export default function ChatPage() {
   function switchBranch(branch) {
     setActiveBranch(branch);
     setStreamText("");
+    api.setActiveBranch(chatId, branch.id).catch(() => {});
   }
 
   // ── SEND ──
@@ -349,7 +288,11 @@ export default function ChatPage() {
   }, [activeBranch]);
 
   const forkMap = useMemo(() => {
-    return buildForkMap(activeBranch, allBranches);
+    return buildVersionMap(activeBranch, allBranches);
+  }, [activeBranch, allBranches]);
+
+  const futures = useMemo(() => {
+    return buildFutures(activeBranch, allBranches);
   }, [activeBranch, allBranches]);
 
   const filteredMessages = useMemo(() => {
@@ -418,15 +361,18 @@ export default function ChatPage() {
               />
               {forks && (
                 <InlineBranchArrows
-                  forks={forks}
-                  activeBranch={activeBranch}
-                  msgIndex={i}
+                  forks={forks.versions.map(v => v.branch)}
+                  current={forks.current}
                   onSwitch={(branch) => switchBranch(branch)}
                 />
               )}
             </React.Fragment>
           );
         })}
+
+        {!streaming && futures.length > 0 && (
+          <FuturesHint futures={futures} onGo={(branch) => switchBranch(branch)} />
+        )}
 
         {streaming && streamText && (
           <MessageBubble msg={{ role: "assistant", content: streamText }} fontSize={fontSz} isStreaming />
@@ -597,20 +543,10 @@ export default function ChatPage() {
 }
 
 // ── INLINE BRANCH ARROWS ──────────────────────────────────────────────────────
-// Renders arrows directly under the forked assistant message.
-// forks = array of branches that all have a reply at this message index.
-// The "current" version is whichever branch's reply matches activeBranch at this index.
-function InlineBranchArrows({ forks, activeBranch, msgIndex, onSwitch }) {
-  const activeVisible = visibleMessages(activeBranch);
-  const activeContent = activeVisible[msgIndex]?.content;
-
-  // Find which fork index is currently active
-  const currentIdx = forks.findIndex(b => {
-    const bVisible = visibleMessages(b);
-    return bVisible[msgIndex]?.content === activeContent;
-  });
-
-  const idx = currentIdx === -1 ? 0 : currentIdx;
+// Renders arrows directly under a reply that has several versions (retries and edits alike).
+// forks = one branch per version, oldest first; current = which of them is on screen.
+function InlineBranchArrows({ forks, current, onSwitch }) {
+  const idx = current;
 
   return (
     <div style={{
@@ -635,6 +571,22 @@ function InlineBranchArrows({ forks, activeBranch, msgIndex, onSwitch }) {
         <ArrowR size={14} style={{ opacity: idx >= forks.length - 1 ? 0.25 : 1 }} />
       </button>
       <span style={{ fontSize: 11, fontFamily: "var(--mono)", color: "var(--text3)" }}>versions</span>
+    </div>
+  );
+}
+
+// ── FUTURES HINT ──────────────────────────────────────────────────────────────
+// Shown after the last message when other versions of this chat carry on from here (typically after
+// Undo): jumps to the most recently used one, where the normal version arrows then take over.
+function FuturesHint({ futures, onGo }) {
+  const latest = futures.reduce((best, f) => ((f.branch.updated_at || "") > (best.branch.updated_at || "") ? f : best));
+
+  return (
+    <div style={{ padding: "2px 0 10px", marginLeft: 4 }}>
+      <button className="btn btn-ghost btn-sm" onClick={() => onGo(latest.branch)}>
+        <ArrowR size={14} />
+        {futures.length === 1 ? "Another version continues from here" : `${futures.length} other versions continue from here`}
+      </button>
     </div>
   );
 }
