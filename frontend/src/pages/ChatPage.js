@@ -434,9 +434,8 @@ export default function ChatPage() {
                 )}
                 {forks && (
                   <InlineBranchArrows
-                    forks={forks}
-                    activeBranch={activeBranch}
-                    msgIndex={i}
+                    forks={forks.versions.map(v => v.branch)}
+                    current={forks.current}
                     onSwitch={(branch) => switchBranch(branch)}
                   />
                 )}
