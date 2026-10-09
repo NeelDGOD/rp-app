@@ -477,7 +477,7 @@ export default function SettingsPage() {
               }}>
                 <div style={{ fontSize: 12, fontFamily: "var(--mono)", color: "var(--text2)" }}>
                   {e.kind} · {e.provider} / {e.model}
-                  {e.fell_back ? <span style={{ color: "var(--accent)", marginLeft: 8 }}>fell back</span> : null}
+                  {e.fell_back ? <span style={{ color: "var(--accent)", marginLeft: 8 }}>tried again</span> : null}
                 </div>
                 <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 2 }}>
                   {new Date(e.created_at + "Z").toLocaleString()}

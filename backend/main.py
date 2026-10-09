@@ -32,6 +32,11 @@ LLM_MAX_RETRIES = 1
 # Puter's free queue can stay silent for 30s+ before the first token, and a full
 # memory document takes ~40s when it isn't streamed, so it gets a longer read limit.
 PUTER_TIMEOUT = httpx.Timeout(LLM_TIMEOUT, read=120)
+# Puter's free route is served by varying upstreams, and only some of them (Alibaba
+# Cloud) run an input content inspection that rejects the request. The identical
+# request usually passes on a retry, so it's retried before falling back.
+MODERATION_ERROR = "DataInspectionFailed"
+MODERATION_RETRIES = 2
 MAX_CONTEXT   = 20
 MEM_INTERVAL  = 6
 EMBED_MODEL   = "gemini-embedding-001"
@@ -485,13 +490,18 @@ def log_api_error(user_id: str, kind: str, provider: str, model: str, error: Exc
 def complete(llm: list, messages: list, user_id: str) -> str:
     for i, (provider, token, model) in enumerate(llm):
         client, model_id = get_client(provider, token, model)
-        try:
-            return client.chat.completions.create(model=model_id, messages=messages).choices[0].message.content
-        except Exception as e:
-            last = i == len(llm) - 1
-            log_api_error(user_id, "memory", provider, model, e, token, fell_back=not last)
-            if last:
-                raise
+        for attempt in range(1 + MODERATION_RETRIES):
+            try:
+                return client.chat.completions.create(model=model_id, messages=messages).choices[0].message.content
+            except Exception as e:
+                last = i == len(llm) - 1
+                retry = attempt < MODERATION_RETRIES and MODERATION_ERROR in str(e)
+                log_api_error(user_id, "memory", provider, model, e, token, fell_back=retry or not last)
+                if retry:
+                    continue
+                if last:
+                    raise
+                break
 
 # Provider SDKs iterate the stream synchronously (blocking network I/O per chunk).
 # Running that directly inside an `async def` route blocks the whole event loop,
@@ -525,20 +535,25 @@ def stream_chat(llm: list, messages: list, user_id: str):
             for i, (provider, token, model) in enumerate(llm):
                 client, model_id = get_client(provider, token, model)
                 started = False
-                try:
-                    for chunk in client.chat.completions.create(model=model_id, messages=messages, stream=True):
-                        if chunk.choices and chunk.choices[0].delta.content:
-                            started = True
-                            result.model = f"{provider} / {model}"
-                        loop.call_soon_threadsafe(queue.put_nowait, chunk)
-                    return
-                except Exception as e:
-                    # Once text has reached the user, switching models would splice
-                    # two different replies together, so only fall back before that.
-                    last = i == len(llm) - 1
-                    log_api_error(user_id, "chat", provider, model, e, token, fell_back=not (started or last))
-                    if started or last:
-                        raise
+                for attempt in range(1 + MODERATION_RETRIES):
+                    try:
+                        for chunk in client.chat.completions.create(model=model_id, messages=messages, stream=True):
+                            if chunk.choices and chunk.choices[0].delta.content:
+                                started = True
+                                result.model = f"{provider} / {model}"
+                            loop.call_soon_threadsafe(queue.put_nowait, chunk)
+                        return
+                    except Exception as e:
+                        # Once text has reached the user, switching models would splice
+                        # two different replies together, so only fall back before that.
+                        last = i == len(llm) - 1
+                        retry = not started and attempt < MODERATION_RETRIES and MODERATION_ERROR in str(e)
+                        log_api_error(user_id, "chat", provider, model, e, token, fell_back=retry or not (started or last))
+                        if retry:
+                            continue
+                        if started or last:
+                            raise
+                        break
         except Exception as e:
             loop.call_soon_threadsafe(queue.put_nowait, e)
         finally:
