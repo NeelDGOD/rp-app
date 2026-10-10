@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { BookOpenText, Brain, ChevronDown, KeyRound, LogOut, RefreshCw, Trash2, UserRound, Wrench } from "lucide-react";
 import { api, clearSession, pushSettingsSoon } from "../lib/api";
 import ModelSettings from "../components/ModelSettings";
+import ToggleSetting from "../components/ToggleSetting";
 import { BusyIcon, PageHeader } from "../components/States";
 import { Composer, Thinking, Turn } from "../components/Transcript";
 import { Prose } from "../lib/format";
@@ -28,27 +29,10 @@ function Section({ id, title, sub, Icon, open, onToggle, children }) {
   );
 }
 
-function ToggleSetting({ label, sub, checked, onChange }) {
-  return (
-    <div className="setting">
-      <div>
-        <div className="setting__label">{label}</div>
-        <div className="setting__sub">{sub}</div>
-      </div>
-      <label className="toggle">
-        <input type="checkbox" checked={checked} aria-label={label} onChange={e => onChange(e.target.checked)} />
-        <div className="toggle-track" />
-        <div className="toggle-thumb" />
-      </label>
-    </div>
-  );
-}
-
 export default function SettingsPage() {
   const nav = useNavigate();
   const [autoMem, setAutoMem]   = useState(true);
   const [useRag, setUseRag]     = useState(false);
-  const [useFallbacks, setUseFallbacks] = useState(false);
   const [errorLog, setErrorLog] = useState(null);
   const [fontSize, setFontSize] = useState(17);
   const [openSections, setOpenSections] = useState(["model"]);
@@ -64,7 +48,6 @@ export default function SettingsPage() {
   useEffect(() => {
     setAutoMem(localStorage.getItem("auto_memory") !== "false");
     setUseRag(localStorage.getItem("use_rag") === "true");
-    setUseFallbacks(localStorage.getItem("use_fallbacks") === "true");
     setFontSize(parseInt(localStorage.getItem("font_size") || "17"));
   }, []);
 
@@ -128,7 +111,7 @@ export default function SettingsPage() {
       <PageHeader title="Settings" />
 
       <div className="col">
-        <Section {...section("model")} title="Model & API key" sub="Provider, key and the model that writes replies" Icon={KeyRound}>
+        <Section {...section("model")} title="Models & API keys" sub="The order models are tried in, and the key for each source" Icon={KeyRound}>
           <ModelSettings />
         </Section>
 
@@ -144,12 +127,6 @@ export default function SettingsPage() {
             sub="Saves each memory update so old details can be recalled in very long chats (uses your Gemini key)"
             checked={useRag}
             onChange={v => { setUseRag(v); save("use_rag", v); }}
-          />
-          <ToggleSetting
-            label="Fall back to saved models"
-            sub="If the current model fails before replying, try your other saved models in list order"
-            checked={useFallbacks}
-            onChange={v => { setUseFallbacks(v); save("use_fallbacks", v); }}
           />
         </Section>
 

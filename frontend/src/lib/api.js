@@ -1,67 +1,13 @@
+import { PROVIDERS } from "./providers";
+import { activeRequest, CHAIN_KEY } from "./chain";
+
+export { PROVIDERS };
+
 const BASE = process.env.REACT_APP_API_URL || "http://localhost:8000";
-
-export const PROVIDERS = {
-  // Hugging Face is disabled: free accounts no longer get Inference Providers credits.
-  // huggingface: {
-  //   label: "Hugging Face",
-  //   tokenKey: "hf_token", modelKey: "hf_model", defaultModel: "deepseek-ai/DeepSeek-V3",
-  //   tokenLabel: "Hugging Face Token", tokenPlaceholder: "hf_…",
-  //   modelHint: "Full model string", modelExample: "deepseek-ai/DeepSeek-V4-Pro:novita",
-  // },
-  openrouter: {
-    label: "OpenRouter",
-    tokenKey: "openrouter_token", modelKey: "openrouter_model", defaultModel: "",
-    tokenLabel: "OpenRouter API Key", tokenPlaceholder: "sk-or-…",
-    modelHint: "Full model slug", modelExample: "anthropic/claude-sonnet-5",
-  },
-  nvidia: {
-    label: "NVIDIA",
-    tokenKey: "nvidia_token", modelKey: "nvidia_model", defaultModel: "deepseek-ai/deepseek-v4.1-flash",
-    tokenLabel: "NVIDIA API Key", tokenPlaceholder: "nvapi-…",
-    modelHint: "Model id from build.nvidia.com", modelExample: "deepseek-ai/deepseek-v4.1-flash",
-  },
-  gemini: {
-    label: "Gemini",
-    tokenKey: "gemini_token", modelKey: "gemini_model", defaultModel: "gemini-3.8-flash",
-    tokenLabel: "Google AI Studio API Key", tokenPlaceholder: "AIza…",
-    modelHint: "Gemini model id", modelExample: "gemini-3.8-flash",
-  },
-  mistral: {
-    label: "Mistral",
-    tokenKey: "mistral_token", modelKey: "mistral_model", defaultModel: "mistral-large-latest",
-    tokenLabel: "Mistral API Key", tokenPlaceholder: "Mistral API key",
-    modelHint: "Mistral model id", modelExample: "mistral-large-latest",
-  },
-  groq: {
-    label: "Groq",
-    tokenKey: "groq_token", modelKey: "groq_model", defaultModel: "llama-3.3-70b-versatile",
-    tokenLabel: "Groq API Key", tokenPlaceholder: "gsk_…",
-    modelHint: "Groq model id", modelExample: "llama-3.3-70b-versatile",
-  },
-  navy: {
-    label: "NavyAI",
-    tokenKey: "navy_token", modelKey: "navy_model", defaultModel: "",
-    tokenLabel: "NavyAI API Key", tokenPlaceholder: "sk-navy-…",
-    modelHint: "Model id from NavyAI's model list", modelExample: "model-id-from-api.navy",
-  },
-  puter: {
-    label: "Puter",
-    tokenKey: "puter_token", modelKey: "puter_model", defaultModel: "deepseek/deepseek-v4.1-flash:free",
-    tokenLabel: "Puter Auth Token", tokenPlaceholder: "Puter auth token",
-    modelHint: "Model id; the ones ending in :free cost nothing", modelExample: "deepseek/deepseek-v4.1-flash:free",
-  },
-};
-
-const DEFAULT_PROVIDER = "gemini";
-
-export function currentProvider() {
-  const stored = localStorage.getItem("llm_provider");
-  return PROVIDERS[stored] ? stored : DEFAULT_PROVIDER;
-}
 
 const SYNCED_NAMES = [
   ...Object.values(PROVIDERS).flatMap(p => [p.tokenKey, p.modelKey]),
-  "llm_provider", "saved_models", "use_fallbacks",
+  "llm_provider", "saved_models", "use_fallbacks", CHAIN_KEY,
 ];
 
 export function clearSession() {
@@ -154,20 +100,8 @@ export function pushSettingsSoon() {
   emitSyncPending();
 }
 
-function fallbackModels(provider, model) {
-  if (localStorage.getItem("use_fallbacks") !== "true") return [];
-  const saved = JSON.parse(localStorage.getItem("saved_models") || "[]");
-  return saved
-    .filter(m => PROVIDERS[m.provider] && !(m.provider === provider && m.model === model))
-    .map(m => ({ provider: m.provider, model: m.model, token: localStorage.getItem(PROVIDERS[m.provider].tokenKey) || "" }))
-    .filter(m => m.token);
-}
-
 function getHeaders() {
-  const provider = currentProvider();
-  const cfg = PROVIDERS[provider];
-  const token = localStorage.getItem(cfg.tokenKey) || "";
-  const model = localStorage.getItem(cfg.modelKey) || cfg.defaultModel;
+  const { provider, model, token, fallbacks } = activeRequest();
   const useRag = localStorage.getItem("use_rag") === "true";
   const authToken = localStorage.getItem("auth_token") || "";
   // RAG embeddings always go through Gemini regardless of which provider is
@@ -179,7 +113,7 @@ function getHeaders() {
     "x-hf-token": token,
     "x-model": model,
     "x-provider": provider,
-    "x-fallbacks": JSON.stringify(fallbackModels(provider, model)),
+    "x-fallbacks": JSON.stringify(fallbacks),
     "x-use-rag": String(useRag),
     "x-embed-token": embedToken,
     "x-auth-token": authToken,

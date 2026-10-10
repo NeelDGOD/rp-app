@@ -2,7 +2,8 @@ import React, { useState, useEffect } from "react";
 import { ChevronDown } from "lucide-react";
 import BottomSheet from "./BottomSheet";
 import ModelSettings from "./ModelSettings";
-import { PROVIDERS, currentProvider, onSettingsPulled } from "../lib/api";
+import { PROVIDERS, onSettingsPulled } from "../lib/api";
+import { activeRequest } from "../lib/chain";
 
 export default function ModelPickerButton() {
   const [open, setOpen] = useState(false);
@@ -10,18 +11,19 @@ export default function ModelPickerButton() {
 
   useEffect(() => onSettingsPulled(() => refresh(n => n + 1)), []);
 
-  const provider = currentProvider();
-  const model = localStorage.getItem(PROVIDERS[provider].modelKey) || PROVIDERS[provider].defaultModel;
+  const { provider, model, fallbacks } = activeRequest();
 
   return (
     <>
-      <button className="model-chip" onClick={() => setOpen(true)} title="Change model and API key">
+      <button className="model-chip" onClick={() => setOpen(true)} title="Change the model order and API keys">
         <span className="model-chip__dot" />
-        <span className="model-chip__text">{PROVIDERS[provider].label} · {model || "no model"}</span>
+        <span className="model-chip__text">
+          {PROVIDERS[provider].label} · {model || "no model"}{fallbacks.length > 0 ? ` +${fallbacks.length}` : ""}
+        </span>
         <ChevronDown size={12} />
       </button>
       {open && (
-        <BottomSheet title="Model & API key" onClose={() => setOpen(false)}>
+        <BottomSheet title="Models & API keys" onClose={() => setOpen(false)}>
           <ModelSettings />
         </BottomSheet>
       )}

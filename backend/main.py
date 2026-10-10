@@ -50,7 +50,7 @@ SYNCED_SETTINGS = (
     # "hf_token", "hf_model",
     "openrouter_token", "nvidia_token", "gemini_token", "mistral_token", "groq_token", "navy_token", "puter_token",
     "openrouter_model", "nvidia_model", "gemini_model", "mistral_model", "groq_model", "navy_model", "puter_model",
-    "llm_provider", "saved_models", "use_fallbacks",
+    "llm_provider", "saved_models", "use_fallbacks", "model_chain",
 )
 
 app = FastAPI()

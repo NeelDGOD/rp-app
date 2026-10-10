@@ -702,3 +702,24 @@ textarea.input { resize: none; display: block; }
   .thinking i { opacity: .7; }
   .spinner { border-right-color: currentColor; border-style: dotted; }
 }
+
+/* ── MODEL ORDER LIST ── */
+.sortable { display: flex; flex-direction: column; gap: 8px; position: relative; }
+.sortable__item { position: relative; }
+.sortable__item.is-shifting { transition: transform .16s var(--ease-out); }
+.sortable__item.is-dragging { z-index: 5; box-shadow: 0 12px 32px rgba(0,0,0,.5); }
+.sortable__item.is-dragging .chain-item { border-color: var(--accent); background: var(--bg3); }
+.chain-item { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+.chain-item__row { display: flex; align-items: center; gap: 2px; padding: 6px 4px 6px 2px; min-height: 62px; }
+.sort-handle { width: 40px; height: 46px; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; color: var(--text3); border-radius: var(--radius-sm); cursor: grab; touch-action: none; -webkit-user-select: none; user-select: none; }
+.sort-handle:hover { color: var(--text); background: var(--bg3); }
+.sort-handle:active { cursor: grabbing; color: var(--accent); }
+.chain-item__num { width: 22px; flex-shrink: 0; text-align: center; font-family: var(--mono); font-size: 12px; color: var(--accent); }
+.chain-item__text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; padding: 0 6px; }
+.chain-item__name { font-size: 15px; font-weight: 500; color: var(--text); overflow-wrap: anywhere; }
+.chain-item__model { font-family: var(--mono); font-size: 11.5px; color: var(--text3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chain-item__warn { font-size: 12px; color: var(--error); }
+.chain-item__edit { display: flex; flex-direction: column; gap: 14px; padding: 14px; border-top: 1px solid var(--border); background: var(--bg); }
+.preset-row { display: flex; flex-wrap: wrap; gap: 8px; }
+select.input { appearance: none; background-image: linear-gradient(45deg, transparent 50%, var(--text3) 50%), linear-gradient(135deg, var(--text3) 50%, transparent 50%); background-position: calc(100% - 20px) 50%, calc(100% - 14px) 50%; background-size: 6px 6px, 6px 6px; background-repeat: no-repeat; padding-right: 36px; }
+@media (prefers-reduced-motion: reduce) { .sortable__item.is-shifting { transition: none; } }
