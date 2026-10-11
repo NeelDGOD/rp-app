@@ -130,6 +130,12 @@ export default function ChatPage() {
     api.setActiveBranch(chatId, branch.id).catch(() => {});
   }
 
+  // The streamed reply stays on screen until the saved chat has been reloaded, so it never blinks out.
+  async function settleStream(reload) {
+    try { await reload(); }
+    finally { setStreaming(false); setStreamText(""); }
+  }
+
   // ── SEND ──
   async function sendMessage() {
     if (!input.trim() || streaming || !activeBranch) return;
@@ -153,12 +159,10 @@ export default function ChatPage() {
       chatId,
       { content: text, branch_id: branchIdAtSend, is_first_turn: isFirstTurn },
       (delta) => setStreamText(t => t + delta),
-      async (evt) => {
-        setStreaming(false);
-        setStreamText("");
+      (evt) => {
         setIsFirstTurn(false);
         if (evt.needs_memory && autoMem) triggerMemoryUpdate(branchIdAtSend, true);
-        await loadChat();
+        return settleStream(loadChat);
       },
       (err) => {
         setStreaming(false); setStreamText("");
@@ -168,6 +172,15 @@ export default function ChatPage() {
         toast(`API error: ${err.message}`, "error", 6000);
       }
     );
+  }
+
+  async function showBranchFromServer(branchId) {
+    const updated = await api.getChat(chatId);
+    const branches = updated.branches || [];
+    setAllBranches(branches);
+    setChat(updated);
+    const branch = branches.find(b => b.id === branchId);
+    if (branch) setActiveBranch(branch);
   }
 
   // ── RETRY ──
@@ -181,16 +194,10 @@ export default function ChatPage() {
       chatId,
       { branch_id: branchIdAtRetry, hint: retryHint },
       (delta) => setStreamText(t => t + delta),
-      async (evt) => {
-        setStreaming(false); setStreamText("");
+      (evt) => {
         setRetryHint("");
         if (evt.needs_memory && autoMem) triggerMemoryUpdate(evt.branch_id, true);
-        const updated = await api.getChat(chatId);
-        const branches = updated.branches || [];
-        setAllBranches(branches);
-        setChat(updated);
-        const newBranch = branches.find(b => b.id === evt.branch_id);
-        if (newBranch) setActiveBranch(newBranch);
+        return settleStream(() => showBranchFromServer(evt.branch_id));
       },
       (err) => {
         setStreaming(false); setStreamText("");
@@ -239,15 +246,9 @@ export default function ChatPage() {
       chatId,
       { branch_id: branchIdAtEdit, visible_index: visibleIndex, new_content: newContent },
       (delta) => setStreamText(t => t + delta),
-      async (evt) => {
-        setStreaming(false); setStreamText("");
+      (evt) => {
         if (evt.needs_memory && autoMem) triggerMemoryUpdate(evt.branch_id, true);
-        const updated = await api.getChat(chatId);
-        const branches = updated.branches || [];
-        setAllBranches(branches);
-        setChat(updated);
-        const newBranch = branches.find(b => b.id === evt.branch_id);
-        if (newBranch) setActiveBranch(newBranch);
+        return settleStream(() => showBranchFromServer(evt.branch_id));
       },
       (err) => {
         setStreaming(false); setStreamText("");
@@ -296,12 +297,7 @@ export default function ChatPage() {
     try {
       const res = await api.restoreBookmark(bmId);
       setSheet(null);
-      const updated = await api.getChat(chatId);
-      const branches = updated.branches || [];
-      setAllBranches(branches);
-      setChat(updated);
-      const nb = branches.find(b => b.id === res.branch_id);
-      if (nb) setActiveBranch(nb);
+      await showBranchFromServer(res.branch_id);
       toast("Bookmark restored", "success", 2000);
     } catch (e) { toast(e.message, "error"); }
   }

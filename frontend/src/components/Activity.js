@@ -11,9 +11,9 @@ export function ActivityBar() {
 
 // Calm, explanatory notice for the free-tier server's cold start, dropped connections and offline.
 export function ActivityNotice() {
-  const { pending, retrying } = useActivity();
+  const { pending, retrying, awake } = useActivity();
   const online = useOnline();
-  const slow = useSlowLoad(pending > 0, 3000);
+  const slow = useSlowLoad(pending > 0 && !awake, 3000);
 
   if (!online) {
     return (

@@ -131,8 +131,8 @@ export default function AIChatPage() {
       { content: text, images: imgs },
       (delta) => setStreamText(t => t + delta),
       async () => {
-        setStreaming(false); setStreamText("");
-        await loadChat();
+        try { await loadChat(); }
+        finally { setStreaming(false); setStreamText(""); }
       },
       (err) => {
         setStreaming(false); setStreamText("");

@@ -128,7 +128,8 @@ function getHeaders() {
 const RETRY_DELAYS_MS = [800, 2500];
 
 // UI activity feedback only: how many requests are waiting for a response, and how many are retrying.
-const activity = { pending: 0, retrying: 0 };
+// `awake` flips once the server has answered anything, so the cold-start notice shows only until then.
+const activity = { pending: 0, retrying: 0, awake: false };
 const activityListeners = new Set();
 const emitActivity = () => activityListeners.forEach(fn => fn({ ...activity }));
 
@@ -144,7 +145,9 @@ async function fetchWithRetry(url, options) {
   try {
     for (let i = 0; ; i++) {
       try {
-        return await fetch(url, options);
+        const res = await fetch(url, options);
+        activity.awake = true;
+        return res;
       } catch (err) {
         if (i >= RETRY_DELAYS_MS.length) throw err;
         if (!retried) { retried = true; activity.retrying++; emitActivity(); }

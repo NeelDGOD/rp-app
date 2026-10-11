@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { onActivity, onSyncPending } from "./api";
 
 export function useActivity() {
-  const [state, setState] = useState({ pending: 0, retrying: 0 });
+  const [state, setState] = useState({ pending: 0, retrying: 0, awake: false });
   useEffect(() => onActivity(setState), []);
   return state;
 }
