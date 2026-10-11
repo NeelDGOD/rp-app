@@ -618,8 +618,13 @@ CHARACTERS:
 RELATIONSHIP:
 KEY EVENTS:
 PROMISES & SECRETS:
+PHYSICAL STATE:
 CURRENT SCENE:
-EMOTIONAL STATE:{directive_block}"""},
+EMOTIONAL STATE:
+
+PHYSICAL STATE records, for every character, what they are wearing, any injuries or physical conditions, where they are,
+and anything they are holding or carrying. Keep these facts verbatim as written in the conversation (exact garments,
+colors, items); only change them when the conversation changes them, and carry the unchanged ones forward every time.{directive_block}"""},
         {"role": "user", "content": f"EXISTING MEMORY:\n{current_memory or '(none yet)'}\n\nNEW CONVERSATION:\n{text}\n\nReturn the fully updated memory document."}
     ]
     raw = complete(llm, prompt, user_id)

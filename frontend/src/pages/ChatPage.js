@@ -14,6 +14,7 @@ import BottomSheet from "../components/BottomSheet";
 import { useToast } from "../components/Toast";
 import { buildVersionMap, buildFutures } from "../lib/branches";
 import ModelPickerButton from "../components/ModelPickerButton";
+import MemoryView from "../components/MemoryView";
 import { BusyIcon, ErrorState, Spinner, TranscriptSkeleton } from "../components/States";
 import { Composer, Thinking, Turn } from "../components/Transcript";
 
@@ -67,6 +68,7 @@ export default function ChatPage() {
   const [botName, setBotName]           = useState("");
   const [reloadKey, setReloadKey]       = useState(0);
   const [memState, setMemState]         = useState(null); // null | "working" | "done" | "failed"
+  const [memoryText, setMemoryText]     = useState(null); // null while the memory sheet is loading
   const [busy, runBusy]                 = useBusy();
 
   const scrollerRef = useRef(null);
@@ -286,6 +288,14 @@ export default function ChatPage() {
     } catch (e) { toast(e.message, "error"); }
   }
 
+  async function openMemory() {
+    setMemoryText(null); setSheet("memory");
+    try {
+      const fresh = await api.getChat(chatId);
+      setMemoryText(fresh.branches.find(b => b.id === activeBranch.id)?.memory || "");
+    } catch (e) { setSheet(null); toast(e.message, "error"); }
+  }
+
   async function openBookmarks() {
     try {
       const bms = await api.getBookmarks(chatId);
@@ -380,6 +390,7 @@ export default function ChatPage() {
               {memChip}
             </div>
           </div>
+          <button className="icon-btn" onClick={openMemory} aria-label="What the bot remembers"><Brain size={19} /></button>
           <button className="icon-btn" onClick={() => setSheet("search")} aria-label="Search this chat"><Search size={19} /></button>
           <button className="icon-btn" onClick={() => runBusy("bookmarks", openBookmarks)} disabled={busy === "bookmarks"} aria-label="Bookmarks">
             <BusyIcon busy={busy === "bookmarks"} Icon={BookmarkCheck} size={19} />
@@ -566,6 +577,12 @@ export default function ChatPage() {
               ? `${filteredMessages.length} result${filteredMessages.length !== 1 ? "s" : ""}, shown in the transcript`
               : "Matching messages are shown in the transcript behind this panel."}
           </p>
+        </BottomSheet>
+      )}
+
+      {sheet === "memory" && (
+        <BottomSheet title="What the bot remembers" onClose={() => setSheet(null)}>
+          {memoryText === null ? <Spinner size={18} /> : <MemoryView memory={memoryText} />}
         </BottomSheet>
       )}
 
