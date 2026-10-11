@@ -6,6 +6,7 @@ import { useActivity, useAutoGrow, useElapsed } from "../lib/ui";
 // One turn of the story: the character's prose under a small name label, or the user's line as an inset cue.
 export function Turn({ role, speaker, showSpeaker, text, images, mode, caret, onActivate }) {
   const isUser = role === "user";
+  if (isUser && !text && !images?.length) return null;
   const tap = onActivate && {
     role: "button",
     tabIndex: 0,

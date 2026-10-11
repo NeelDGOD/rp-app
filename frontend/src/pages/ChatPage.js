@@ -5,7 +5,7 @@ import { useParams, useNavigate } from "react-router-dom";
 import {
   ChevronLeft, RotateCcw, Undo2, Bookmark, BookmarkCheck,
   ChevronLeft as ArrowL, ChevronRight as ArrowR,
-  Sparkles, Brain, Search, X
+  Sparkles, Brain, Search, X, Play, MessageSquarePlus
 } from "lucide-react";
 import { api } from "../lib/api";
 import { useAutoGrow, useBusy, useScrollToEnd } from "../lib/ui";
@@ -59,6 +59,7 @@ export default function ChatPage() {
   const [isFirstTurn, setIsFirstTurn]   = useState(false);
   const [sheet, setSheet]               = useState(null);
   const [retryHint, setRetryHint]       = useState("");
+  const [continueHint, setContinueHint] = useState("");
   const [bookmarkLabel, setBookmarkLabel] = useState("");
   const [bookmarks, setBookmarks]       = useState([]);
   const [searchQuery, setSearchQuery]   = useState("");
@@ -146,6 +147,24 @@ export default function ChatPage() {
 
     if (text === "/commands") { setSheet("commands"); return; }
 
+    sendTurn(text, true);
+  }
+
+  // Continue and Continue with direction send a bare {continue} command: the bot advances the scene on its own.
+  function doContinue(direction = "") {
+    if (streaming || !activeBranch) return;
+    const note = direction.replace(/[{}]/g, "").trim();
+    setSheet(null);
+    sendTurn(note ? `{continue: ${note}}` : "{continue}", false);
+  }
+
+  function sendContinueHint() {
+    const direction = continueHint;
+    setContinueHint("");
+    doContinue(direction);
+  }
+
+  function sendTurn(text, restoreInputOnError) {
     setStreaming(true); setStreamText("");
 
     const optimisticHistory = [
@@ -169,8 +188,10 @@ export default function ChatPage() {
       (err) => {
         setStreaming(false); setStreamText("");
         setActiveBranch(b => ({ ...b, history: historyAtSend }));
-        setInput(text);
-        sessionStorage.setItem(`draft_${chatId}`, text);
+        if (restoreInputOnError) {
+          setInput(text);
+          sessionStorage.setItem(`draft_${chatId}`, text);
+        }
         toast(`API error: ${err.message}`, "error", 6000);
       }
     );
@@ -454,6 +475,17 @@ export default function ChatPage() {
             <FuturesHint futures={futures} onGo={(branch) => switchBranch(branch)} />
           )}
 
+          {!streaming && sheet !== "search" && displayMessages[displayMessages.length - 1]?.role === "assistant" && (
+            <div className="continue-row">
+              <button className="chip" onClick={() => doContinue()} disabled={!!busy}>
+                <Play size={15} /> Continue
+              </button>
+              <button className="chip" onClick={() => setSheet("continue")} disabled={!!busy}>
+                <MessageSquarePlus size={15} /> Continue with direction
+              </button>
+            </div>
+          )}
+
           {streaming && streamText && (
             <Turn role="assistant" speaker={botName}
               showSpeaker={displayMessages[displayMessages.length - 1]?.role !== "assistant"}
@@ -495,6 +527,18 @@ export default function ChatPage() {
             onKeyDown={e => e.key === "Enter" && doRetry()} autoFocus />
           <button className="btn btn-primary btn-block" onClick={doRetry}>
             <RotateCcw size={16} /> Retry
+          </button>
+        </BottomSheet>
+      )}
+
+      {sheet === "continue" && (
+        <BottomSheet title="Continue with direction" onClose={() => setSheet(null)}>
+          <p className="sheet-note">The story moves on without a message from you, steered by this direction.</p>
+          <input className="input" placeholder="Direction, e.g. she finally admits the truth…"
+            value={continueHint} onChange={e => setContinueHint(e.target.value)}
+            onKeyDown={e => e.key === "Enter" && continueHint.trim() && sendContinueHint()} autoFocus />
+          <button className="btn btn-primary btn-block" onClick={sendContinueHint} disabled={!continueHint.trim()}>
+            <Play size={16} /> Continue
           </button>
         </BottomSheet>
       )}

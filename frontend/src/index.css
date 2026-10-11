@@ -728,3 +728,6 @@ select.input { appearance: none; background-image: linear-gradient(45deg, transp
 .memory-doc { display: flex; flex-direction: column; gap: 18px; padding-bottom: 8px; }
 .memory-doc__section { display: flex; flex-direction: column; gap: 6px; }
 .memory-doc__text { margin: 0; font-size: 15px; line-height: 1.6; color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* ── CONTINUE ROW ── */
+.continue-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
