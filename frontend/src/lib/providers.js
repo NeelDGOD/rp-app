@@ -76,6 +76,19 @@ export const PROVIDERS = {
       { label: "Qwen 3.8 Flash (free)", model: "qwen/qwen3.8-flash:free" },
     ],
   },
+  freetheai: {
+    label: "FreeTheAI",
+    tokenKey: "freetheai_token", modelKey: "freetheai_model", defaultModel: "fta/ocz/deepseek-v4.1-flash-free",
+    tokenLabel: "FreeTheAI API Key", tokenPlaceholder: "ftai_…",
+    modelHint: "Model id from freetheai.org; free ones end in -free or :free. Free models need the daily check-in on their site", modelExample: "fta/ocz/deepseek-v4.1-flash-free",
+    presets: [
+      { label: "DeepSeek 4.1 Flash (free)", model: "fta/ocz/deepseek-v4.1-flash-free" },
+      { label: "DeepSeek Chat", model: "fta/zzz/deepseek-chat" },
+      { label: "DeepSeek V4 Flash 0731", model: "fta/cat/deepseek-ai/deepseek-v4-flash-0731" },
+      { label: "GLM 5.3 Flash (free)", model: "fta/ocz/glm-5.3-flash-free" },
+      { label: "Nemotron Ultra (free)", model: "fta/kai/nvidia/nemotron-3-ultra-550b-a55b:free" },
+    ],
+  },
 };
 
 export const DEFAULT_PROVIDER = "gemini";
