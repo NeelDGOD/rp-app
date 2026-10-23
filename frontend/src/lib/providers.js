@@ -105,6 +105,19 @@ export const ALL_PROVIDERS = {
       { label: "DeepSeek V4 Pro", model: "china/DeepSeek-V4-Pro" },
     ],
   },
+  routmy: {
+    label: "rout.my",
+    tokenKey: "routmy_token", modelKey: "routmy_model", defaultModel: "deepseek/deepseek-v4-flash",
+    tokenLabel: "rout.my API Key", tokenPlaceholder: "sk_…",
+    modelHint: "Exact id from api.rout.my/v1/models. Free plan: 650,000 quota a day, 10 requests a minute; each model spends its multiplier times the tokens",
+    modelExample: "deepseek/deepseek-v4-flash",
+    presets: [
+      { label: "DeepSeek V4 Flash (0.5x)", model: "deepseek/deepseek-v4-flash" },
+      { label: "DeepSeek V4 Pro (0.7x)", model: "deepseek/deepseek-v4-pro" },
+      { label: "DeepSeek V4.1 Flash (0.8x)", model: "deepseek/deepseek-v4.1-flash" },
+      { label: "GLM 5.3 Flash (0.7x)", model: "z-ai/glm-5.3-flash" },
+    ],
+  },
   freetheai: {
     label: "FreeTheAI",
     tokenKey: "freetheai_token", modelKey: "freetheai_model", defaultModel: "fta/ocz/deepseek-v4.1-flash-free",
