@@ -489,6 +489,20 @@ def llm_candidates(x_hf_token: str = Header(...), x_model: str = Header(default=
     """The selected (provider, token, model) followed by the user's fallbacks, in order."""
     return [(x_provider, x_hf_token, x_model)] + [(f["provider"], f["token"], f["model"]) for f in json.loads(x_fallbacks)]
 
+def bot_check(e: Exception) -> bool:
+    """True when a provider answered with Cloudflare's bot-check page instead of a reply."""
+    message = str(e).lower()
+    return ("<html" in message or "<!doctype" in message) and ("just a moment" in message or "challenges.cloudflare.com" in message)
+
+# A bot check can be intermittent, so it is retried a couple of times, like a moderation rejection; if it persists,
+# the source's other models are skipped (they sit behind the same check) and the next source is tried.
+def retryable(e: Exception) -> bool:
+    return MODERATION_ERROR in str(e) or bot_check(e)
+
+def pause_before_retry(e: Exception):
+    if bot_check(e):
+        time.sleep(2)
+
 def error_text(e: Exception) -> str:
     """A provider that answers with a web page (a Cloudflare bot check, a gateway error) must not put that page into
     the chat toast or the error log; say what happened instead, keeping the HTTP status when there is one."""
@@ -497,8 +511,7 @@ def error_text(e: Exception) -> str:
     if "<html" not in lowered and "<!doctype" not in lowered:
         return message
     status = re.search(r"(?<!\d)([1-5]\d\d)(?!\d)", message[:60])
-    blocked = "just a moment" in lowered or "challenges.cloudflare.com" in lowered
-    why = "the provider's bot check (Cloudflare) blocked this server instead of answering" if blocked else "the provider returned a web page instead of an answer"
+    why = "the provider's bot check (Cloudflare) blocked this server instead of answering" if bot_check(e) else "the provider returned a web page instead of an answer"
     return why + (f" (HTTP {status.group(1)})" if status else "")
 
 def log_api_error(user_id: str, kind: str, provider: str, model: str, error: Exception,
@@ -517,20 +530,25 @@ def log_api_error(user_id: str, kind: str, provider: str, model: str, error: Exc
         pass
 
 def complete(llm: list, messages: list, user_id: str) -> str:
+    blocked, failure = set(), None
     for i, (provider, token, model) in enumerate(llm):
+        if provider in blocked:
+            continue
         client, model_id = get_client(provider, token, model)
         for attempt in range(1 + MODERATION_RETRIES):
             try:
                 return client.chat.completions.create(model=model_id, messages=messages).choices[0].message.content
             except Exception as e:
-                last = i == len(llm) - 1
-                retry = attempt < MODERATION_RETRIES and MODERATION_ERROR in str(e)
-                log_api_error(user_id, "memory", provider, model, e, token, fell_back=retry or not last)
+                failure = e
+                retry = attempt < MODERATION_RETRIES and retryable(e)
+                log_api_error(user_id, "memory", provider, model, e, token, fell_back=retry or i < len(llm) - 1)
                 if retry:
+                    pause_before_retry(e)
                     continue
-                if last:
-                    raise
+                if bot_check(e):
+                    blocked.add(provider)
                 break
+    raise failure
 
 # Provider SDKs iterate the stream synchronously (blocking network I/O per chunk).
 # Running that directly inside an `async def` route blocks the whole event loop,
@@ -561,7 +579,10 @@ def stream_chat(llm: list, messages: list, user_id: str):
 
     def worker():
         try:
+            blocked, failure = set(), None
             for i, (provider, token, model) in enumerate(llm):
+                if provider in blocked:
+                    continue
                 client, model_id = get_client(provider, token, model)
                 started = False
                 for attempt in range(1 + MODERATION_RETRIES):
@@ -575,14 +596,18 @@ def stream_chat(llm: list, messages: list, user_id: str):
                     except Exception as e:
                         # Once text has reached the user, switching models would splice
                         # two different replies together, so only fall back before that.
-                        last = i == len(llm) - 1
-                        retry = not started and attempt < MODERATION_RETRIES and MODERATION_ERROR in str(e)
-                        log_api_error(user_id, "chat", provider, model, e, token, fell_back=retry or not (started or last))
+                        failure = e
+                        retry = not started and attempt < MODERATION_RETRIES and retryable(e)
+                        log_api_error(user_id, "chat", provider, model, e, token, fell_back=retry or not (started or i == len(llm) - 1))
                         if retry:
+                            pause_before_retry(e)
                             continue
-                        if started or last:
+                        if started:
                             raise
+                        if bot_check(e):
+                            blocked.add(provider)
                         break
+            raise failure
         except Exception as e:
             loop.call_soon_threadsafe(queue.put_nowait, e)
         finally:
