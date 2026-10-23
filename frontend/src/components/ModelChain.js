@@ -1,9 +1,10 @@
 import React, { useEffect, useState } from "react";
 import { Check, GripVertical, Pencil, Plus, X } from "lucide-react";
 import { PROVIDERS, pushSettingsSoon, onSettingsPulled } from "../lib/api";
-import { addEntry, moveEntry, readChain, removeEntry, updateEntry, writeChain } from "../lib/chain";
+import { addEntry, addGroup, entryModels, moveEntry, readChain, removeEntry, updateEntry, writeChain } from "../lib/chain";
 import SortableList from "./SortableList";
 import ToggleSetting from "./ToggleSetting";
+import VariantList from "./VariantList";
 
 const hasKey = provider => !!localStorage.getItem(PROVIDERS[provider].tokenKey);
 const fallbackOn = () => localStorage.getItem("use_fallbacks") === "true";
@@ -39,6 +40,11 @@ export default function ModelChain() {
     setForm(f => ({ ...f, model: "", name: "" }));
   }
 
+  function addPreset(p) {
+    if (p.group) commit(addGroup(chain, { provider: form.provider, name: p.name, models: p.group }));
+    else add({ provider: form.provider, model: p.model, name: p.label });
+  }
+
   const cfg = PROVIDERS[form.provider];
 
   return (
@@ -70,7 +76,10 @@ export default function ModelChain() {
                 <span className="chain-item__num">{i + 1}</span>
                 <div className="chain-item__text">
                   <span className="chain-item__name">{e.name || e.model || "No model id"}</span>
-                  <span className="chain-item__model">{PROVIDERS[e.provider].label}{e.name && e.model ? ` · ${e.model}` : ""}</span>
+                  <span className="chain-item__model">
+                    {PROVIDERS[e.provider].label}
+                    {e.variants ? ` · ${entryModels(e).length} of ${e.variants.length} models on` : e.name && e.model ? ` · ${e.model}` : ""}
+                  </span>
                   {!hasKey(e.provider) && <span className="chain-item__warn">No {PROVIDERS[e.provider].label} key, so this one is skipped</span>}
                 </div>
                 <button type="button" className="icon-btn" aria-label={editing === e.id ? "Done editing" : `Edit model ${i + 1}`}
@@ -88,11 +97,15 @@ export default function ModelChain() {
                     <label className="field-label" htmlFor={`src-${e.id}`}>Source</label>
                     <SourceSelect id={`src-${e.id}`} value={e.provider} onChange={provider => commit(updateEntry(chain, e.id, { provider }))} />
                   </div>
-                  <div className="field">
-                    <label className="field-label" htmlFor={`mid-${e.id}`}>Model id</label>
-                    <input id={`mid-${e.id}`} className="input input-mono" value={e.model} placeholder={PROVIDERS[e.provider].modelExample}
-                      onChange={ev => commit(updateEntry(chain, e.id, { model: ev.target.value }))} />
-                  </div>
+                  {e.variants ? (
+                    <VariantList entry={e} chain={chain} commit={commit} example={PROVIDERS[e.provider].modelExample} />
+                  ) : (
+                    <div className="field">
+                      <label className="field-label" htmlFor={`mid-${e.id}`}>Model id</label>
+                      <input id={`mid-${e.id}`} className="input input-mono" value={e.model} placeholder={PROVIDERS[e.provider].modelExample}
+                        onChange={ev => commit(updateEntry(chain, e.id, { model: ev.target.value }))} />
+                    </div>
+                  )}
                   <div className="field">
                     <label className="field-label" htmlFor={`nick-${e.id}`}>Nickname (optional)</label>
                     <input id={`nick-${e.id}`} className="input" value={e.name} placeholder="e.g. V4 Pro"
@@ -111,7 +124,7 @@ export default function ModelChain() {
         {cfg.presets.length > 0 && (
           <div className="preset-row" role="group" aria-label={`${cfg.label} quick picks`}>
             {cfg.presets.map(p => (
-              <button key={p.model} type="button" className="chip" onClick={() => add({ provider: form.provider, model: p.model, name: p.label })}>
+              <button key={p.label} type="button" className="chip" onClick={() => addPreset(p)}>
                 <Plus size={14} /> {p.label}
               </button>
             ))}

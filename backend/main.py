@@ -24,6 +24,7 @@ OPENAI_COMPAT_BASE_URLS = {
     "groq": "https://api.groq.com/openai/v1",
     "navy": "https://api.navy/v1",
     "freetheai": "https://api.freetheai.org/v1",
+    "budsai": "https://apichat.budsin.dev/v1",
 }
 PUTER_URL = "https://api.puter.com/drivers/call"
 # A stalled provider (Puter can hang instead of erroring once its allowance is
@@ -49,8 +50,8 @@ KEYS_SECRET   = os.environ.get("KEYS_SECRET", "")
 LOG_RETENTION_DAYS = 14
 SYNCED_SETTINGS = (
     # "hf_token", "hf_model",
-    "openrouter_token", "nvidia_token", "gemini_token", "mistral_token", "groq_token", "navy_token", "puter_token", "freetheai_token",
-    "openrouter_model", "nvidia_model", "gemini_model", "mistral_model", "groq_model", "navy_model", "puter_model", "freetheai_model",
+    "openrouter_token", "nvidia_token", "gemini_token", "mistral_token", "groq_token", "navy_token", "puter_token", "freetheai_token", "budsai_token",
+    "openrouter_model", "nvidia_model", "gemini_model", "mistral_model", "groq_model", "navy_model", "puter_model", "freetheai_model", "budsai_model",
     "llm_provider", "saved_models", "use_fallbacks", "model_chain",
 )
 

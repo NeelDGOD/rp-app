@@ -731,3 +731,10 @@ select.input { appearance: none; background-image: linear-gradient(45deg, transp
 
 /* ── CONTINUE ROW ── */
 .continue-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+
+/* ── GROUP TILE ── */
+.variant-row { display: flex; align-items: center; gap: 4px; padding: 4px 2px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg2); }
+.variant-row.is-off { opacity: .55; }
+.variant-row__on { width: 20px; height: 20px; flex-shrink: 0; accent-color: var(--accent); }
+.variant-row__model { flex: 1; min-width: 0; padding: 8px 10px; font-size: 13px; }
+.sort-handle--small { width: 32px; height: 38px; }

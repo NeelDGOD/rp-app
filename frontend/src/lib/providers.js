@@ -76,6 +76,29 @@ export const PROVIDERS = {
       { label: "Qwen 3.8 Flash (free)", model: "qwen/qwen3.8-flash:free" },
     ],
   },
+  budsai: {
+    label: "BudsAI",
+    tokenKey: "budsai_token", modelKey: "budsai_model", defaultModel: "glm-5-3-flash",
+    tokenLabel: "BudsAI API Key", tokenPlaceholder: "sk-…",
+    modelHint: "Model id from apichat.budsin.dev/pricing. Avoid ids priced at $6 or more per 1M tokens", modelExample: "glm-5-3-flash",
+    presets: [
+      {
+        label: "GLM 5.3 (7 models, best first)",
+        name: "GLM 5.3",
+        group: [
+          { model: "glm-5-3-flash" },
+          { model: "glm-5-3" },
+          { model: "zai/glm-5.3-flash", enabled: false },
+          { model: "zai/glm-5.3", enabled: false },
+          { model: "zai-org/glm-5.3-flash", enabled: false },
+          { model: "zai-org/glm-5.3", enabled: false },
+          { model: "kovaksai/glm-5.3", enabled: false },
+        ],
+      },
+      { label: "DeepSeek Chat", model: "deepseek-chat" },
+      { label: "DeepSeek V3.2", model: "deepseek-v3.2" },
+    ],
+  },
   freetheai: {
     label: "FreeTheAI",
     tokenKey: "freetheai_token", modelKey: "freetheai_model", defaultModel: "fta/ocz/deepseek-v4.1-flash-free",
