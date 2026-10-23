@@ -488,11 +488,23 @@ def llm_candidates(x_hf_token: str = Header(...), x_model: str = Header(default=
     """The selected (provider, token, model) followed by the user's fallbacks, in order."""
     return [(x_provider, x_hf_token, x_model)] + [(f["provider"], f["token"], f["model"]) for f in json.loads(x_fallbacks)]
 
+def error_text(e: Exception) -> str:
+    """A provider that answers with a web page (a Cloudflare bot check, a gateway error) must not put that page into
+    the chat toast or the error log; say what happened instead, keeping the HTTP status when there is one."""
+    message = str(e)
+    lowered = message.lower()
+    if "<html" not in lowered and "<!doctype" not in lowered:
+        return message
+    status = re.search(r"(?<!\d)([1-5]\d\d)(?!\d)", message[:60])
+    blocked = "just a moment" in lowered or "challenges.cloudflare.com" in lowered
+    why = "the provider's bot check (Cloudflare) blocked this server instead of answering" if blocked else "the provider returned a web page instead of an answer"
+    return why + (f" (HTTP {status.group(1)})" if status else "")
+
 def log_api_error(user_id: str, kind: str, provider: str, model: str, error: Exception,
                   secret: str = "", fell_back: bool = False):
     """Record a failed provider call in the database. Logging must never break the
     request it describes, so any failure here is swallowed."""
-    message = str(error)
+    message = error_text(error)
     if secret.strip():
         message = message.replace(secret.strip(), "[key]")
     cutoff = (datetime.utcnow() - timedelta(days=LOG_RETENTION_DAYS)).isoformat()
@@ -972,7 +984,7 @@ async def send_message(chat_id: str, data: SendMsg,
             set_active_branch(chat_id, data.branch_id)
             yield f"data: {json.dumps({'type':'done','needs_memory':needs_mem,'turn_counter':turn_counter})}\n\n"
         except Exception as e:
-            yield f"data: {json.dumps({'type':'error','message':str(e)})}\n\n"
+            yield f"data: {json.dumps({'type':'error','message':error_text(e)})}\n\n"
 
     return StreamingResponse(stream(), media_type="text/event-stream")
 
@@ -1018,7 +1030,7 @@ async def retry_message(chat_id: str, data: RetryMsg,
             set_active_branch(chat_id, new_bid)
             yield f"data: {json.dumps({'type':'done','branch_id':new_bid,'needs_memory':needs_mem})}\n\n"
         except Exception as e:
-            yield f"data: {json.dumps({'type':'error','message':str(e)})}\n\n"
+            yield f"data: {json.dumps({'type':'error','message':error_text(e)})}\n\n"
 
     return StreamingResponse(stream(), media_type="text/event-stream")
 
@@ -1059,7 +1071,7 @@ def update_memory(branch_id: str, llm: list = Depends(llm_candidates),
                 log_api_error(user_id, "embedding", "gemini", EMBED_MODEL, e, x_embed_token)
         return {"ok": True, "memory": new_mem, "director_note": new_note}
     except Exception as e:
-        raise HTTPException(500, str(e))
+        raise HTTPException(500, error_text(e))
 
 # ── BOOKMARKS ─────────────────────────────────────────────────────────────────
 @app.get("/chats/{chat_id}/bookmarks")
@@ -1173,7 +1185,7 @@ async def edit_user_message(chat_id: str, data: EditUserMsg,
             set_active_branch(chat_id, new_bid)
             yield f"data: {json.dumps({'type':'done','branch_id':new_bid,'needs_memory':needs_mem})}\n\n"
         except Exception as e:
-            yield f"data: {json.dumps({'type':'error','message':str(e)})}\n\n"
+            yield f"data: {json.dumps({'type':'error','message':error_text(e)})}\n\n"
 
     return StreamingResponse(stream(), media_type="text/event-stream")
 
@@ -1199,7 +1211,7 @@ async def test_chat(data: TestMsg,
                     yield f"data: {json.dumps({'type':'delta','content':delta})}\n\n"
             yield f"data: {json.dumps({'type':'done'})}\n\n"
         except Exception as e:
-            yield f"data: {json.dumps({'type':'error','message':str(e)})}\n\n"
+            yield f"data: {json.dumps({'type':'error','message':error_text(e)})}\n\n"
 
     return StreamingResponse(stream(), media_type="text/event-stream")
 
@@ -1270,7 +1282,7 @@ async def send_ai_message(chat_id: str, data: AIChatSendMsg,
             conn.commit(); conn.close()
             yield f"data: {json.dumps({'type':'done'})}\n\n"
         except Exception as e:
-            yield f"data: {json.dumps({'type':'error','message':str(e)})}\n\n"
+            yield f"data: {json.dumps({'type':'error','message':error_text(e)})}\n\n"
 
     return StreamingResponse(stream(), media_type="text/event-stream")
 
