@@ -65,30 +65,72 @@ export async function readSse(body, onData, onChunk = () => {}) {
   flush(buffer);
 }
 
-async function readableError(res) {
-  const text = await res.text().catch(() => "");
+function describeFailure(status, text) {
   if (/<html|<!doctype/i.test(text)) {
     const blocked = /just a moment|challenges\.cloudflare\.com/i.test(text);
-    return `${blocked ? "the provider's bot check (Cloudflare) blocked this request" : "the provider returned a web page instead of an answer"} (HTTP ${res.status})`;
+    return `${blocked ? "the provider's bot check (Cloudflare) blocked this request" : "the provider returned a web page instead of an answer"} (HTTP ${status})`;
   }
   try {
     const message = JSON.parse(text)?.error?.message;
-    if (message) return `${message} (HTTP ${res.status})`;
+    if (message) return `${message} (HTTP ${status})`;
   } catch { /* not JSON */ }
-  return `HTTP ${res.status}${text ? `: ${text.slice(0, 200)}` : ""}`;
+  return `HTTP ${status}${text ? `: ${text.slice(0, 200)}` : ""}`;
+}
+
+// A source that allows one request at a time answers a second one with 429 "retry after 1s". That is an instruction to
+// wait, so the call waits and tries again (for a memory update or a reply still running, or the app open on two devices).
+function retryAfterMs(res, text) {
+  const header = Number(res.headers.get("retry-after"));
+  const seconds = header > 0 ? header : Number(/retry after (\d+(?:\.\d+)?)\s*s/i.exec(text)?.[1]) || 1;
+  return Math.min(5000, Math.max(500, seconds * 1000)) + Math.random() * 400;
+}
+
+const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+// Sources that allow only one request at a time (`browserConcurrency` in providers.js) get a queue here, so the app never
+// sends them two requests at once (a memory update and a message, say). Lower priority numbers go first; memory
+// updates wait behind replies. Requests from another device are still answered with 429 and handled below.
+const queues = new Map();
+
+function startNext(queue, limit) {
+  while (queue.running < limit && queue.waiting.length) {
+    const best = queue.waiting.reduce((lowest, job, index) => (job.priority < queue.waiting[lowest].priority ? index : lowest), 0);
+    queue.waiting.splice(best, 1)[0].start();
+  }
+}
+
+function inQueue(provider, priority, task) {
+  const limit = PROVIDERS[provider].browserConcurrency;
+  if (!limit) return task();
+  if (!queues.has(provider)) queues.set(provider, { running: 0, waiting: [] });
+  const queue = queues.get(provider);
+  return new Promise((resolve, reject) => {
+    const start = () => {
+      queue.running++;
+      task().then(resolve, reject).finally(() => { queue.running--; startNext(queue, limit); });
+    };
+    queue.waiting.push({ priority, start });
+    startNext(queue, limit);
+  });
 }
 
 // One streamed chat completion straight from the browser. Resolves with the full reply text. The error says whether
-// text had already been shown (`started`). Reasoning models spend a long time "thinking" before the first word, so the
-// time limit is on silence: it gives up only when nothing at all (text, reasoning or keepalive) arrives for idleMs.
-export async function streamCompletion({ provider, model, token }, messages, onDelta, { fetchImpl = fetch, idleMs = 60000 } = {}) {
+// text had already been shown (`started`).
+export function streamCompletion(candidate, messages, onDelta, options = {}) {
+  return inQueue(candidate.provider, options.priority ?? 0, () => runCompletion(candidate, messages, onDelta, options));
+}
+
+// Reasoning models think for a long time, and some relays hold the whole response until the model has finished, so the
+// first response may take minutes (firstByteMs); once it is arriving, silence of idleMs means it has stalled.
+async function runCompletion({ provider, model, token }, messages, onDelta,
+  { fetchImpl = fetch, idleMs = 60000, firstByteMs = 240000, maxWaitMs = 180000, sleep = pause } = {}) {
   const controller = new AbortController();
   let timer;
-  const alive = () => {
+  const alive = (ms = idleMs) => {
     clearTimeout(timer);
-    timer = setTimeout(() => controller.abort(), idleMs);
+    timer = setTimeout(() => controller.abort(), ms);
   };
-  alive();
+  alive(firstByteMs);
   let text = "";
   const got = delta => {
     if (!delta) return;
@@ -96,13 +138,24 @@ export async function streamCompletion({ provider, model, token }, messages, onD
     onDelta(delta);
   };
   try {
-    const res = await fetchImpl(`${PROVIDERS[provider].browserBase}/chat/completions`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token.trim()}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model, messages, stream: true }),
-      signal: controller.signal,
-    });
-    if (!res.ok) throw new ModelError(await readableError(res));
+    let res;
+    for (let waited = 0; ; ) {
+      res = await fetchImpl(`${PROVIDERS[provider].browserBase}/chat/completions`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token.trim()}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ model, messages, stream: true }),
+        signal: controller.signal,
+      });
+      if (res.status !== 429) break;
+      const failure = await res.text().catch(() => "");
+      const wait = retryAfterMs(res, failure);
+      if (waited + wait > maxWaitMs) throw new ModelError(describeFailure(429, failure));
+      await sleep(wait);
+      waited += wait;
+      alive(firstByteMs);
+    }
+    alive();
+    if (!res.ok) throw new ModelError(describeFailure(res.status, await res.text().catch(() => "")));
     if ((res.headers.get("content-type") || "").includes("application/json")) {
       got((await res.json()).choices?.[0]?.message?.content);
     } else {

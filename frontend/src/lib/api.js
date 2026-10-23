@@ -263,7 +263,7 @@ async function updateMemoryViaBrowser(branchId) {
       const { messages } = await request("POST", path, null, stepHeaders(segment.items, "prepare"));
       for (const item of segment.items) {
         let reply;
-        try { reply = await streamCompletion(item, messages, () => {}); } catch (err) { failure = err; continue; }
+        try { reply = await streamCompletion(item, messages, () => {}, { priority: 1 }); } catch (err) { failure = err; continue; }
         return await request("POST", path, { reply }, stepHeaders(segment.items, "commit"));
       }
     } catch (err) {

@@ -69,8 +69,41 @@ test("a provider that ignores stream and answers with JSON still works", async (
 });
 
 test("errors are readable: a JSON error keeps its message and status", async () => {
-  await assert.rejects(run("m", async () => failure(429, JSON.stringify({ error: { message: "rate limit exceeded, retry after 1s" } }))),
+  await assert.rejects(run("m", async () => failure(401, JSON.stringify({ error: { message: "Invalid token" } }))),
+    e => e instanceof ModelError && /Invalid token/.test(e.message) && /401/.test(e.message) && e.started === false);
+});
+
+const limited = JSON.stringify({ error: { message: "rate limit exceeded, retry after 1s" } });
+
+test("a 429 means wait and try again: the call succeeds once a slot is free", async () => {
+  let calls = 0;
+  const waits = [];
+  const fetchImpl = async () => (++calls <= 3 ? failure(429, limited) : streamResponse([...sse("Finally"), "data: [DONE]\n\n"]));
+  const { text } = await run("m", fetchImpl, { sleep: async ms => { waits.push(ms); } });
+  assert.equal(text, "Finally");
+  assert.equal(calls, 4);
+  assert.equal(waits.length, 3);
+  assert.ok(waits.every(ms => ms >= 1000 && ms <= 1400), `waits follow "retry after 1s": ${waits}`);
+});
+
+test("the Retry-After header is honoured, within sensible limits", async () => {
+  const waits = [];
+  let calls = 0;
+  const fetchImpl = async () => {
+    if (++calls === 1) return { ...failure(429, "{}"), headers: new Headers({ "retry-after": "3" }) };
+    if (calls === 2) return { ...failure(429, "{}"), headers: new Headers({ "retry-after": "600" }) };
+    return streamResponse(sse("ok"));
+  };
+  await run("m", fetchImpl, { sleep: async ms => { waits.push(ms); } });
+  assert.ok(waits[0] >= 3000 && waits[0] <= 3400);
+  assert.ok(waits[1] >= 5000 && waits[1] <= 5400, "a huge value is capped at 5 seconds");
+});
+
+test("a source that stays rate limited is given up on after the maximum wait, with its own message", async () => {
+  let calls = 0;
+  await assert.rejects(run("m", async () => { calls++; return failure(429, limited); }, { sleep: async () => {}, maxWaitMs: 5000 }),
     e => e instanceof ModelError && /rate limit exceeded/.test(e.message) && /429/.test(e.message) && e.started === false);
+  assert.ok(calls >= 3 && calls <= 6, `kept trying for a while: ${calls} calls`);
 });
 
 test("errors are readable: a Cloudflare bot-check page becomes one line", async () => {
@@ -91,7 +124,7 @@ test("an error event in the middle of a reply is reported as started, so it is f
 const hung = (url, options) => new Promise((_, reject) => options.signal.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" }))));
 
 test("silence past the limit is an error that has not started", async () => {
-  await assert.rejects(run("m", hung, { idleMs: 30 }), e => /No answer in time/.test(e.message) && e.started === false);
+  await assert.rejects(run("m", hung, { firstByteMs: 30 }), e => /No answer in time/.test(e.message) && e.started === false);
 });
 
 const slowStream = (events, gapMs) => new ReadableStream({
@@ -183,4 +216,61 @@ test("when every segment fails, the last error is reported", async () => {
   const segments = splitSegments([item("budsai", "b1"), item("puter", "p1")]);
   await runSegments(segments, async () => { throw new ModelError("browser failed"); }, async () => { throw new ModelError("server failed"); }, onDelta, onDone, onError);
   assert.match(log.error.message, /server failed/);
+});
+
+// ---- one request at a time for sources that allow only one -----------------------------------------------------
+const heldResponse = gate => ({
+  ok: true, status: 200, headers: new Headers({ "content-type": "text/event-stream" }),
+  body: new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode(sse("held")[0])); gate.then(() => controller.close()); } }),
+});
+const modelOf = options => JSON.parse(options.body).model;
+const later = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+test("a source that allows one request at a time is never sent two at once", async () => {
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const started = [];
+  const fetchImpl = async (url, options) => {
+    started.push(modelOf(options));
+    return started.length === 1 ? heldResponse(gate) : streamResponse(sse("second"));
+  };
+  const first = run("one", fetchImpl);
+  const second = run("two", fetchImpl);
+  await later(60);
+  assert.deepEqual(started, ["one"], "the second request waits in the app's queue, it is not sent");
+  release();
+  const [a, b] = await Promise.all([first, second]);
+  assert.equal(a.text, "held");
+  assert.equal(b.text, "second");
+  assert.deepEqual(started, ["one", "two"]);
+});
+
+test("a reply jumps ahead of a memory update that is still waiting", async () => {
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const started = [];
+  const fetchImpl = async (url, options) => {
+    started.push(modelOf(options));
+    return started.length === 1 ? heldResponse(gate) : streamResponse(sse("x"));
+  };
+  const running = run("running", fetchImpl);
+  const memory = run("memory", fetchImpl, { priority: 1 });
+  const reply = run("reply", fetchImpl);
+  await later(40);
+  release();
+  await Promise.all([running, memory, reply]);
+  assert.deepEqual(started, ["running", "reply", "memory"]);
+});
+
+test("a failed call frees the queue for the next one", async () => {
+  const outcomes = await Promise.allSettled([run("a", async () => failure(401, "{}")), run("b", async () => streamResponse(sse("fine")))]);
+  assert.equal(outcomes[0].status, "rejected");
+  assert.equal(outcomes[1].status, "fulfilled");
+  assert.equal(outcomes[1].value.text, "fine");
+});
+
+test("a slow first response is waited for, and only silence after it starts counts as a stall", async () => {
+  const slow = async () => { await later(120); return streamResponse([...sse("late"), "data: [DONE]\n\n"]); };
+  const { text } = await run("m", slow, { firstByteMs: 1000, idleMs: 30 });
+  assert.equal(text, "late");
 });

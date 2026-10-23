@@ -80,6 +80,8 @@ export const ALL_PROVIDERS = {
     label: "BudsAI",
     // Its bot protection blocks this app's server, so the browser calls it directly (see browserModels.js).
     browserBase: process.env.REACT_APP_BUDSAI_BASE || "https://apichat.budsin.dev/v1",
+    // It answers a second request made while one is running with 429, and each reply takes 30 to 60 seconds.
+    browserConcurrency: 1,
     tokenKey: "budsai_token", modelKey: "budsai_model", defaultModel: "glm-5-3-flash",
     tokenLabel: "BudsAI API Key", tokenPlaceholder: "sk-…",
     modelHint: "Model id from apichat.budsin.dev/pricing. Avoid ids priced at $6 or more per 1M tokens", modelExample: "glm-5-3-flash",
