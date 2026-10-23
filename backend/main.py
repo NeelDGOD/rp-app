@@ -122,17 +122,17 @@ def row(conn, sql, params=(), cols=None):
 
 TRANSIENT_DB_ERRORS = ("Stream already in use", "stream not found")
 
-def with_db_retry(fn):
+def with_db_retry(fn, attempts=3, delay=0.3):
     """Run a block of database work, retrying on libsql's transient Hrana stream
     errors — 'stream already in use' (concurrent requests racing on the same
     underlying stream) and 'stream not found' (the server dropped it) — instead
     of surfacing them to the user or crashing startup."""
-    for attempt in range(3):
+    for attempt in range(attempts):
         try:
             return fn()
         except Exception as e:
-            if any(msg in str(e) for msg in TRANSIENT_DB_ERRORS) and attempt < 2:
-                time.sleep(0.3 * (attempt + 1))
+            if any(msg in str(e) for msg in TRANSIENT_DB_ERRORS) and attempt < attempts - 1:
+                time.sleep(delay * (attempt + 1))
                 continue
             raise
 
@@ -194,7 +194,8 @@ def init_db():
     conn.commit()
     conn.close()
 
-with_db_retry(init_db)
+# Turso can stay unavailable for several seconds around a deploy, so startup waits it out instead of exiting.
+with_db_retry(init_db, attempts=8, delay=1.0)
 
 # ── AUTH ──────────────────────────────────────────────────────────────────────
 def hash_password(pw: str) -> str:
