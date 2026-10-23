@@ -94,6 +94,15 @@ export const PROVIDERS = {
       { label: "DeepSeek V3.2", model: "deepseek-v3.2" },
     ],
   },
+  forest: {
+    label: "Forest Proxy",
+    tokenKey: "forest_token", modelKey: "forest_model", defaultModel: "muse/glm-5.3-flash-free",
+    tokenLabel: "Forest Proxy API Key", tokenPlaceholder: "sk-…",
+    modelHint: "Model id from the proxy's dashboard; small quota, and some ids are often down", modelExample: "muse/glm-5.3-flash-free",
+    presets: [
+      { label: "GLM 5.3 Flash (free)", model: "muse/glm-5.3-flash-free" },
+    ],
+  },
   freetheai: {
     label: "FreeTheAI",
     tokenKey: "freetheai_token", modelKey: "freetheai_model", defaultModel: "fta/ocz/deepseek-v4.1-flash-free",

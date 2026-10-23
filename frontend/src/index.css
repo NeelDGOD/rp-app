@@ -738,3 +738,19 @@ select.input { appearance: none; background-image: linear-gradient(45deg, transp
 .variant-row__on { width: 20px; height: 20px; flex-shrink: 0; accent-color: var(--accent); }
 .variant-row__model { flex: 1; min-width: 0; padding: 8px 10px; font-size: 13px; }
 .sort-handle--small { width: 32px; height: 38px; }
+
+/* ── API KEY ROWS ── */
+.key-acc { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); }
+.key-acc.is-open { border-color: var(--border2); }
+.key-acc__head { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 54px; padding: 8px 14px; text-align: left; }
+.key-acc__head:focus-visible { outline-offset: -2px; }
+.key-acc__name { flex: 1; min-width: 0; font-size: 15px; font-weight: 500; color: var(--text); }
+.key-acc__state { font-size: 12.5px; color: var(--text3); }
+.key-acc__state.is-set { color: var(--accent); }
+.key-acc__chev { color: var(--text3); flex-shrink: 0; transition: transform .3s var(--ease-out), color .2s; }
+.key-acc.is-open .key-acc__chev { transform: rotate(180deg); color: var(--text2); }
+.key-acc__panel { display: grid; grid-template-rows: 0fr; visibility: hidden; transition: grid-template-rows .28s var(--ease-out), visibility 0s linear .28s; }
+.key-acc.is-open .key-acc__panel { grid-template-rows: 1fr; visibility: visible; transition: grid-template-rows .28s var(--ease-out), visibility 0s; }
+.key-acc__inner { min-height: 0; overflow: hidden; }
+.key-acc__body { display: flex; flex-direction: column; gap: 8px; padding: 2px 14px 14px; }
+@media (prefers-reduced-motion: reduce) { .key-acc__panel, .key-acc.is-open .key-acc__panel, .key-acc__chev { transition: none; } }

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Eye, EyeOff } from "lucide-react";
+import { ChevronDown, Eye, EyeOff } from "lucide-react";
 import { PROVIDERS, pushSettingsSoon, onSyncFailed, onSettingsPulled } from "../lib/api";
 import { useSyncPending } from "../lib/ui";
 import { Spinner } from "./States";
@@ -10,6 +10,7 @@ const readKeys = () => Object.fromEntries(Object.entries(PROVIDERS).map(([id, p]
 export default function ProviderKeys({ onChange }) {
   const [keys, setKeys] = useState(readKeys);
   const [shown, setShown] = useState(null);
+  const [open, setOpen] = useState(null);
   const [syncFailed, setSyncFailed] = useState(false);
   const syncPending = useSyncPending();
 
@@ -28,24 +29,36 @@ export default function ProviderKeys({ onChange }) {
       <div className="field-label">API keys</div>
       <div className="field-hint">One key per source; every model that uses a source shares it.</div>
       {Object.entries(PROVIDERS).map(([id, p]) => (
-        <div className="field" key={id}>
-          <label className="field-label" htmlFor={`key-${id}`}>{p.tokenLabel}</label>
-          <div className="input-wrap">
-            <input
-              id={`key-${id}`}
-              name={p.tokenKey}
-              autoComplete="new-password"
-              data-lpignore="true"
-              data-1p-ignore="true"
-              className="input input-mono"
-              type={shown === id ? "text" : "password"}
-              placeholder={p.tokenPlaceholder}
-              value={keys[id]}
-              onChange={e => setKey(id, e.target.value)}
-            />
-            <button type="button" className="icon-btn" onClick={() => setShown(shown === id ? null : id)} aria-label={shown === id ? "Hide key" : "Show key"}>
-              {shown === id ? <EyeOff size={17} /> : <Eye size={17} />}
-            </button>
+        <div className={`key-acc${open === id ? " is-open" : ""}`} key={id}>
+          <button type="button" className="key-acc__head" aria-expanded={open === id} aria-controls={`key-panel-${id}`}
+            onClick={() => setOpen(open === id ? null : id)}>
+            <span className="key-acc__name">{p.label}</span>
+            <span className={`key-acc__state${keys[id] ? " is-set" : ""}`}>{keys[id] ? "Key saved" : "No key"}</span>
+            <ChevronDown size={17} className="key-acc__chev" />
+          </button>
+          <div className="key-acc__panel" id={`key-panel-${id}`}>
+            <div className="key-acc__inner">
+              <div className="key-acc__body">
+                <label className="field-label" htmlFor={`key-${id}`}>{p.tokenLabel}</label>
+                <div className="input-wrap">
+                  <input
+                    id={`key-${id}`}
+                    name={p.tokenKey}
+                    autoComplete="new-password"
+                    data-lpignore="true"
+                    data-1p-ignore="true"
+                    className="input input-mono"
+                    type={shown === id ? "text" : "password"}
+                    placeholder={p.tokenPlaceholder}
+                    value={keys[id]}
+                    onChange={e => setKey(id, e.target.value)}
+                  />
+                  <button type="button" className="icon-btn" onClick={() => setShown(shown === id ? null : id)} aria-label={shown === id ? "Hide key" : "Show key"}>
+                    {shown === id ? <EyeOff size={17} /> : <Eye size={17} />}
+                  </button>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       ))}
