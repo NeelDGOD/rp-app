@@ -101,6 +101,8 @@ export const PROVIDERS = {
     modelHint: "Model id from the proxy's dashboard; small quota, and some ids are often down", modelExample: "muse/glm-5.3-flash-free",
     presets: [
       { label: "GLM 5.3 Flash (free)", model: "muse/glm-5.3-flash-free" },
+      { label: "DeepSeek V4 Flash", model: "china/DeepSeek-V4-Flash" },
+      { label: "DeepSeek V4 Pro", model: "china/DeepSeek-V4-Pro" },
     ],
   },
   freetheai: {
