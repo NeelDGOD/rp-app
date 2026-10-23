@@ -2,7 +2,7 @@
 // next one is tried, and so on. An entry is either one (source, model id) or a group: one tile that holds
 // an ordered list of model ids for the same source (`variants`), each of which can be switched off.
 // Pure functions over a storage-like object so they can be tested without a browser.
-import { PROVIDERS, DEFAULT_PROVIDER } from "./providers";
+import { ALL_PROVIDERS, PROVIDERS, DEFAULT_PROVIDER } from "./providers";
 
 export const CHAIN_KEY = "model_chain";
 // A request carries every key it may need in headers, so the list is capped to keep them small.
@@ -50,8 +50,12 @@ export function readChain(storage = localStorage) {
   return legacyChain(storage);
 }
 
+// Entries of sources that are switched off are not shown, but they stay in storage so they come back with the source.
 export function writeChain(chain, storage = localStorage) {
-  storage.setItem(CHAIN_KEY, JSON.stringify(chain));
+  let stored = [];
+  try { stored = JSON.parse(storage.getItem(CHAIN_KEY)) || []; } catch { stored = []; }
+  const hidden = Array.isArray(stored) ? stored.filter(e => e && ALL_PROVIDERS[e.provider] && !PROVIDERS[e.provider]) : [];
+  storage.setItem(CHAIN_KEY, JSON.stringify([...chain, ...hidden]));
 }
 
 // Header values for one request: the first usable entry becomes the primary and the rest the fallbacks.

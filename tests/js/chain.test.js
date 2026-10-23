@@ -8,40 +8,40 @@ const store = (obj = {}) => ({ getItem: k => (k in obj ? obj[k] : null), setItem
 const keys = (...ps) => p => (ps.includes(p) ? `key-${p}` : "");
 const ids = chain => chain.map(e => `${e.provider}:${e.model}`);
 
-// the owner's own example: 1 puter 4.1 free, 2 puter 3.2 paid, 3 puter nvidia free, 4 gemini, 5 groq
+// the owner's own example: 1 puter 4.1 free, 2 puter 3.2 paid, 3 puter nvidia free, 4 gemini, 5 groq (now forest)
 const EXAMPLE = [
   { id: "a", provider: "puter", model: "deepseek/deepseek-v4.1-flash:free", name: "" },
   { id: "b", provider: "puter", model: "openrouter:deepseek/deepseek-v3.2", name: "" },
   { id: "c", provider: "puter", model: "nvidia/nemotron-3-ultra-550b-a55b:free", name: "" },
   { id: "d", provider: "gemini", model: "gemini-3.8-flash", name: "" },
-  { id: "e", provider: "groq", model: "llama-3.3-70b-versatile", name: "" },
+  { id: "e", provider: "forest", model: "llama-3.3-70b-versatile", name: "" },
 ];
 
 test("the owner's example: same source three times, then two others, in that exact order", () => {
-  const req = chainToRequest(EXAMPLE, keys("puter", "gemini", "groq"), true);
+  const req = chainToRequest(EXAMPLE, keys("puter", "gemini", "forest"), true);
   assert.deepEqual([req.provider, req.model, req.token], ["puter", "deepseek/deepseek-v4.1-flash:free", "key-puter"]);
   assert.deepEqual(req.fallbacks.map(f => `${f.provider}:${f.model}`), [
-    "puter:openrouter:deepseek/deepseek-v3.2", "puter:nvidia/nemotron-3-ultra-550b-a55b:free", "gemini:gemini-3.8-flash", "groq:llama-3.3-70b-versatile"]);
+    "puter:openrouter:deepseek/deepseek-v3.2", "puter:nvidia/nemotron-3-ultra-550b-a55b:free", "gemini:gemini-3.8-flash", "forest:llama-3.3-70b-versatile"]);
   assert.ok(req.fallbacks.every(f => f.token === `key-${f.provider}`), "each entry uses its source's key");
 });
 
 test("fallback switched off: only the first usable entry is used", () => {
-  const req = chainToRequest(EXAMPLE, keys("puter", "gemini", "groq"), false);
+  const req = chainToRequest(EXAMPLE, keys("puter", "gemini", "forest"), false);
   assert.equal(req.model, "deepseek/deepseek-v4.1-flash:free");
   assert.deepEqual(req.fallbacks, []);
 });
 
 test("entries whose source has no key are skipped; the next usable one becomes the first", () => {
-  const req = chainToRequest(EXAMPLE, keys("gemini", "groq"), true);
+  const req = chainToRequest(EXAMPLE, keys("gemini", "forest"), true);
   assert.deepEqual([req.provider, req.model], ["gemini", "gemini-3.8-flash"]);
-  assert.deepEqual(req.fallbacks.map(f => f.provider), ["groq"]);
-  const off = chainToRequest(EXAMPLE, keys("gemini", "groq"), false);
+  assert.deepEqual(req.fallbacks.map(f => f.provider), ["forest"]);
+  const off = chainToRequest(EXAMPLE, keys("gemini", "forest"), false);
   assert.deepEqual([off.provider, off.fallbacks.length], ["gemini", 0]);
 });
 
 test("entries without a model id are skipped", () => {
   const chain = [{ id: "x", provider: "puter", model: "  ", name: "" }, ...EXAMPLE.slice(3)];
-  const req = chainToRequest(chain, keys("puter", "gemini", "groq"), true);
+  const req = chainToRequest(chain, keys("puter", "gemini", "forest"), true);
   assert.equal(req.provider, "gemini");
 });
 
@@ -89,17 +89,17 @@ test("fresh install: a single default entry", () => {
 });
 
 test("a saved model list takes over; broken or empty storage falls back to the old settings", () => {
-  const s = store({ llm_provider: "groq" });
+  const s = store({ llm_provider: "forest" });
   writeChain(EXAMPLE, s);
   assert.deepEqual(ids(readChain(s)), ids(EXAMPLE));
   s.data[CHAIN_KEY] = "{not json";
-  assert.deepEqual(ids(readChain(s)), [`groq:${PROVIDERS.groq.defaultModel}`]);
+  assert.deepEqual(ids(readChain(s)), [`forest:${PROVIDERS.forest.defaultModel}`]);
   s.data[CHAIN_KEY] = "[]";
   assert.deepEqual(readChain(s), [], "an explicitly empty list stays empty (the user removed everything)");
 });
 
 test("saved entries with bad data are dropped on read", () => {
-  const s = store({ [CHAIN_KEY]: JSON.stringify([{ provider: "puter", model: "ok" }, { provider: "nope", model: "x" }, { provider: "groq" }, null]) });
+  const s = store({ [CHAIN_KEY]: JSON.stringify([{ provider: "puter", model: "ok" }, { provider: "nope", model: "x" }, { provider: "forest" }, null]) });
   assert.deepEqual(ids(readChain(s)), ["puter:ok"]);
 });
 
@@ -131,7 +131,7 @@ test("moveEntry: reorder by index, clamped, never mutating", () => {
 
 test("moving entries changes which model is tried first", () => {
   const moved = moveEntry(EXAMPLE, 3, 0);                       // gemini to the top
-  const req = chainToRequest(moved, keys("puter", "gemini", "groq"), true);
+  const req = chainToRequest(moved, keys("puter", "gemini", "forest"), true);
   assert.deepEqual([req.provider, req.fallbacks[0].model], ["gemini", "deepseek/deepseek-v4.1-flash:free"]);
 });
 
@@ -140,15 +140,15 @@ test("activeRequest reads the list, the per-source keys and the fallback switch 
   writeChain(EXAMPLE, s);
   const on = activeRequest(s);
   assert.deepEqual([on.provider, on.token], ["puter", "P"]);
-  assert.deepEqual(on.fallbacks.map(f => f.provider), ["puter", "puter", "gemini"], "groq has no key, so it is skipped");
+  assert.deepEqual(on.fallbacks.map(f => f.provider), ["puter", "puter", "gemini"], "forest has no key, so it is skipped");
   s.data.use_fallbacks = "false";
   assert.equal(activeRequest(s).fallbacks.length, 0);
 });
 
 test("activeRequest keeps working for someone who never used the list (old settings only)", () => {
-  const s = store({ llm_provider: "groq", groq_token: "GK", groq_model: "llama-3.3-70b-versatile" });
+  const s = store({ llm_provider: "forest", forest_token: "GK", forest_model: "llama-3.3-70b-versatile" });
   const req = activeRequest(s);
-  assert.deepEqual([req.provider, req.model, req.token, req.fallbacks.length], ["groq", "llama-3.3-70b-versatile", "GK", 0]);
+  assert.deepEqual([req.provider, req.model, req.token, req.fallbacks.length], ["forest", "llama-3.3-70b-versatile", "GK", 0]);
 });
 
 // ---- group tiles: one entry holding an ordered list of model ids -----------------------------------------
@@ -167,25 +167,25 @@ test("a group is tried in its own order, between the entries around it", () => {
   const chain = [
     { id: "a", provider: "puter", model: "p1", name: "" },
     { ...glmTile(), variants: glmTile().variants.map(v => ({ ...v, enabled: true })) },
-    { id: "z", provider: "groq", model: "g1", name: "" },
+    { id: "z", provider: "forest", model: "g1", name: "" },
   ];
-  const req = chainToRequest(chain, keys("puter", "budsai", "groq"), true);
+  const req = chainToRequest(chain, keys("puter", "budsai", "forest"), true);
   assert.deepEqual(ids2(req), ["p1", ...GLM.map(v => v.model), "g1"]);
   assert.ok(req.fallbacks.filter(f => f.provider === "budsai").every(f => f.token === "key-budsai"));
 });
 
 test("switched-off ids are skipped; a group with everything off is skipped entirely", () => {
   const tile = addGroup([], { provider: "budsai", name: "t", models: [{ model: "a" }, { model: "b", enabled: false }, { model: "c" }] })[0];
-  const req = chainToRequest([tile, { id: "z", provider: "groq", model: "g1", name: "" }], keys("budsai", "groq"), true);
+  const req = chainToRequest([tile, { id: "z", provider: "forest", model: "g1", name: "" }], keys("budsai", "forest"), true);
   assert.deepEqual(ids2(req), ["a", "c", "g1"]);
   const allOff = { ...tile, variants: tile.variants.map(v => ({ ...v, enabled: false })) };
-  const next = chainToRequest([allOff, { id: "z", provider: "groq", model: "g1", name: "" }], keys("budsai", "groq"), true);
-  assert.deepEqual([next.provider, next.model, next.fallbacks.length], ["groq", "g1", 0]);
+  const next = chainToRequest([allOff, { id: "z", provider: "forest", model: "g1", name: "" }], keys("budsai", "forest"), true);
+  assert.deepEqual([next.provider, next.model, next.fallbacks.length], ["forest", "g1", 0]);
 });
 
 test("a group whose source has no key is skipped, and fallback off uses only its first enabled id", () => {
   const tile = glmTile();
-  const noKey = chainToRequest([tile, { id: "z", provider: "groq", model: "g1", name: "" }], keys("groq"), true);
+  const noKey = chainToRequest([tile, { id: "z", provider: "forest", model: "g1", name: "" }], keys("forest"), true);
   assert.deepEqual(ids2(noKey), ["g1"]);
   const off = chainToRequest([tile], keys("budsai"), false);
   assert.deepEqual([off.model, off.fallbacks.length], ["glm-5-3-flash", 0]);
@@ -227,4 +227,23 @@ test("groups count toward the request cap by the ids they contribute", () => {
   const req = chainToRequest(big, keys("budsai"), true);
   assert.equal(1 + req.fallbacks.length, MAX_CHAIN);
   assert.equal(req.model, "m0");
+});
+
+// ---- sources switched off for now keep their saved entries ------------------------------------------------
+test("entries of a switched-off source are hidden but survive every write", () => {
+  const s = store({ [CHAIN_KEY]: JSON.stringify([{ id: "a", provider: "puter", model: "p1" }, { id: "h", provider: "groq", model: "llama-3.3-70b-versatile" }]) });
+  const shown = readChain(s);
+  assert.deepEqual(ids(shown), ["puter:p1"], "groq is switched off, so it is not shown");
+  writeChain(addEntry(shown, { provider: "gemini", model: "g" }), s);
+  const raw = JSON.parse(s.data[CHAIN_KEY]);
+  assert.deepEqual(raw.map(e => `${e.provider}:${e.model}`), ["puter:p1", "gemini:g", "groq:llama-3.3-70b-versatile"]);
+  assert.deepEqual(ids(readChain(s)), ["puter:p1", "gemini:g"]);
+});
+
+test("a switched-off source is never sent, and unknown names are still dropped on write", () => {
+  const req = chainToRequest([{ id: "h", provider: "groq", model: "m" }, { id: "p", provider: "puter", model: "p1" }], keys("groq", "puter"), true);
+  assert.deepEqual([req.provider, req.fallbacks.length], ["puter", 0]);
+  const s = store({ [CHAIN_KEY]: JSON.stringify([{ id: "x", provider: "nope", model: "m" }]) });
+  writeChain([], s);
+  assert.deepEqual(JSON.parse(s.data[CHAIN_KEY]), []);
 });

@@ -1,5 +1,5 @@
-// Every model source the app can call. `presets` are one-tap model ids for the model list.
-export const PROVIDERS = {
+// Every model source the app knows. `presets` are one-tap model ids for the model list.
+export const ALL_PROVIDERS = {
   // Hugging Face is disabled: free accounts no longer get Inference Providers credits.
   // huggingface: {
   //   label: "Hugging Face",
@@ -119,5 +119,11 @@ export const PROVIDERS = {
     ],
   },
 };
+
+// Sources switched off for now. They disappear from the app, but their saved keys and model-list entries are
+// kept and still synced, so removing a name from this list brings them back exactly as they were.
+const DISABLED = ["navy", "nvidia", "mistral", "groq"];
+
+export const PROVIDERS = Object.fromEntries(Object.entries(ALL_PROVIDERS).filter(([id]) => !DISABLED.includes(id)));
 
 export const DEFAULT_PROVIDER = "gemini";

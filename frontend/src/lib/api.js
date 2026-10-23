@@ -1,4 +1,4 @@
-import { PROVIDERS } from "./providers";
+import { ALL_PROVIDERS, PROVIDERS } from "./providers";
 import { activeRequest, CHAIN_KEY } from "./chain";
 
 export { PROVIDERS };
@@ -6,7 +6,7 @@ export { PROVIDERS };
 const BASE = process.env.REACT_APP_API_URL || "http://localhost:8000";
 
 const SYNCED_NAMES = [
-  ...Object.values(PROVIDERS).flatMap(p => [p.tokenKey, p.modelKey]),
+  ...Object.values(ALL_PROVIDERS).flatMap(p => [p.tokenKey, p.modelKey]),
   "llm_provider", "saved_models", "use_fallbacks", CHAIN_KEY,
 ];
 
