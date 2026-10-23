@@ -78,6 +78,8 @@ export const ALL_PROVIDERS = {
   },
   budsai: {
     label: "BudsAI",
+    // Its bot protection blocks this app's server, so the browser calls it directly (see browserModels.js).
+    browserBase: process.env.REACT_APP_BUDSAI_BASE || "https://apichat.budsin.dev/v1",
     tokenKey: "budsai_token", modelKey: "budsai_model", defaultModel: "glm-5-3-flash",
     tokenLabel: "BudsAI API Key", tokenPlaceholder: "sk-…",
     modelHint: "Model id from apichat.budsin.dev/pricing. Avoid ids priced at $6 or more per 1M tokens", modelExample: "glm-5-3-flash",

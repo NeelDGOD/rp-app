@@ -350,12 +350,17 @@ class Rename(BaseModel):
 
 class SendMsg(BaseModel):
     content: str; branch_id: str; is_first_turn: bool = False
+    reply: Optional[str] = None; served_by: str = ""
 
 class RetryMsg(BaseModel):
     branch_id: str; hint: str = ""
+    reply: Optional[str] = None; served_by: str = ""
 
 class BookmarkCreate(BaseModel):
     branch_id: str; label: str
+
+class MemoryCommit(BaseModel):
+    reply: Optional[str] = None
 
 class RestoreHistory(BaseModel):
     history: list; memory: str = ""; turn_counter: int = 0
@@ -366,6 +371,7 @@ class AIChatCreate(BaseModel):
 class AIChatSendMsg(BaseModel):
     content: str
     images: list = []  # data URLs (base64), optional
+    reply: Optional[str] = None
 
 # ── SYSTEM PROMPT ─────────────────────────────────────────────────────────────
 CMD_RULES = """
@@ -503,6 +509,15 @@ def pause_before_retry(e: Exception):
     if bot_check(e):
         time.sleep(2)
 
+# Some sources are called from the user's browser, because they refuse requests from this server. For those, every
+# model-calling endpoint has two extra steps, chosen with the x-phase header: "prepare" returns the exact messages the
+# model should receive and saves nothing; "commit" saves a reply the browser already fetched, exactly as if this
+# server had streamed it. Without the header nothing changes.
+def reply_text(reply: Optional[str]) -> str:
+    if not isinstance(reply, str) or not reply.strip():
+        raise HTTPException(400, "Empty reply")
+    return reply
+
 def error_text(e: Exception) -> str:
     """A provider that answers with a web page (a Cloudflare bot check, a gateway error) must not put that page into
     the chat toast or the error log; say what happened instead, keeping the HTTP status when there is one."""
@@ -635,7 +650,7 @@ def stream_chat(llm: list, messages: list, user_id: str):
     result.gen = gen()
     return result
 
-def do_memory_update(history: list, current_memory: str, llm: list, user_id: str, director_note: str = "") -> tuple:
+def memory_prompt(history: list, current_memory: str, director_note: str = "") -> list:
     text = "\n".join(
         f"{'User' if m['role']=='user' else 'Bot'}: {m['content']}"
         for m in history[-20:] if m["role"] in ("user", "assistant")
@@ -669,8 +684,9 @@ and anything they are holding or carrying. Keep these facts verbatim as written 
 colors, items); only change them when the conversation changes them, and carry the unchanged ones forward every time.{directive_block}"""},
         {"role": "user", "content": f"EXISTING MEMORY:\n{current_memory or '(none yet)'}\n\nNEW CONVERSATION:\n{text}\n\nReturn the fully updated memory document."}
     ]
-    raw = complete(llm, prompt, user_id)
+    return prompt
 
+def parse_memory_reply(raw: str, director_note: str) -> tuple:
     new_note = director_note
     m = re.search(r"DIRECTOR_NOTE:\s*(KEEP|DROP)", raw, re.IGNORECASE)
     if m:
@@ -678,6 +694,10 @@ colors, items); only change them when the conversation changes them, and carry t
         if m.group(1).upper() == "DROP":
             new_note = ""
     return raw, new_note
+
+def do_memory_update(history: list, current_memory: str, llm: list, user_id: str, director_note: str = "") -> tuple:
+    raw = complete(llm, memory_prompt(history, current_memory, director_note), user_id)
+    return parse_memory_reply(raw, director_note)
 
 # ── RAG (memory chunk embedding + retrieval) ─────────────────────────────────
 # Embeddings are computed remotely via Gemini's API rather than loading
@@ -931,6 +951,7 @@ async def send_message(chat_id: str, data: SendMsg,
                        llm: list = Depends(llm_candidates),
                        x_use_rag: str = Header(default="false"),
                        x_embed_token: str = Header(default=""),
+                       x_phase: str = Header(default=""),
                        user_id: str = Depends(require_user)):
     conn = get_db()
     c = chat_owned(chat_id, user_id, conn)
@@ -966,7 +987,7 @@ async def send_message(chat_id: str, data: SendMsg,
     resume = resume_injection(b["memory"]) if data.is_first_turn else None
     send_hist = build_send_history(b["history"], b["memory"], resume)
 
-    if x_use_rag.lower() == "true" and x_embed_token:
+    if x_phase != "commit" and x_use_rag.lower() == "true" and x_embed_token:
         # RAG context is a best-effort enhancement — a broken/unauthorized
         # embed token must never block sending the actual chat message.
         try:
@@ -987,6 +1008,21 @@ async def send_message(chat_id: str, data: SendMsg,
     send_hist.append({"role": "user", "content": cleaned})
     b["history"].append({"role": "user", "content": cleaned})
 
+    def finish(full: str, served_by: str) -> dict:
+        turn_counter = commit_turn(
+            data.branch_id, sys_msg(bot["content"]),
+            [{"role": "user", "content": cleaned}, {"role": "assistant", "content": full, "model": served_by}],
+            b["director_note"] if b["director_note"] != note_before else None)
+        needs_mem = turn_counter % MEM_INTERVAL == 0
+        touch_chat(chat_id)
+        set_active_branch(chat_id, data.branch_id)
+        return {'type': 'done', 'needs_memory': needs_mem, 'turn_counter': turn_counter}
+
+    if x_phase == "prepare":
+        return {"messages": send_hist}
+    if x_phase == "commit":
+        return finish(reply_text(data.reply), data.served_by)
+
     async def stream():
         full = ""
         try:
@@ -1001,14 +1037,7 @@ async def send_message(chat_id: str, data: SendMsg,
                 if delta:
                     full += delta
                     yield f"data: {json.dumps({'type':'delta','content':delta})}\n\n"
-            turn_counter = commit_turn(
-                data.branch_id, sys_msg(bot["content"]),
-                [{"role": "user", "content": cleaned}, {"role": "assistant", "content": full, "model": reply.model}],
-                b["director_note"] if b["director_note"] != note_before else None)
-            needs_mem = turn_counter % MEM_INTERVAL == 0
-            touch_chat(chat_id)
-            set_active_branch(chat_id, data.branch_id)
-            yield f"data: {json.dumps({'type':'done','needs_memory':needs_mem,'turn_counter':turn_counter})}\n\n"
+            yield f"data: {json.dumps(finish(full, reply.model))}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'type':'error','message':error_text(e)})}\n\n"
 
@@ -1018,6 +1047,7 @@ async def send_message(chat_id: str, data: SendMsg,
 @app.post("/chats/{chat_id}/retry")
 async def retry_message(chat_id: str, data: RetryMsg,
                         llm: list = Depends(llm_candidates),
+                        x_phase: str = Header(default=""),
                         user_id: str = Depends(require_user)):
     chat_owned(chat_id, user_id)
     parent = get_branch_data(data.branch_id)
@@ -1030,6 +1060,24 @@ async def retry_message(chat_id: str, data: RetryMsg,
 
     new_bid = str(uuid.uuid4()); n = ts()
 
+    def finish(full: str, served_by: str) -> dict:
+        new_hist = hist_base + [{"role": "assistant", "content": full, "model": served_by}]
+        needs_mem = parent["turn_counter"] % MEM_INTERVAL == 0
+        def _persist():
+            conn = get_db()
+            q(conn, "INSERT INTO branches VALUES (?,?,?,?,?,?,?,?,?,?)",
+              (new_bid, chat_id, data.branch_id, len(hist_base), json.dumps(new_hist), parent["memory"], parent["turn_counter"], n, n, parent["director_note"]))
+            q(conn, "UPDATE chats SET updated_at=? WHERE id=?", (ts(), chat_id))
+            conn.commit(); conn.close()
+        with_db_retry(_persist)
+        set_active_branch(chat_id, new_bid)
+        return {'type': 'done', 'branch_id': new_bid, 'needs_memory': needs_mem}
+
+    if x_phase == "prepare":
+        return {"messages": send_hist}
+    if x_phase == "commit":
+        return finish(reply_text(data.reply), data.served_by)
+
     async def stream():
         full = ""
         try:
@@ -1044,17 +1092,7 @@ async def retry_message(chat_id: str, data: RetryMsg,
                 if delta:
                     full += delta
                     yield f"data: {json.dumps({'type':'delta','content':delta})}\n\n"
-            new_hist = hist_base + [{"role": "assistant", "content": full, "model": reply.model}]
-            needs_mem = parent["turn_counter"] % MEM_INTERVAL == 0
-            def _persist():
-                conn = get_db()
-                q(conn, "INSERT INTO branches VALUES (?,?,?,?,?,?,?,?,?,?)",
-                  (new_bid, chat_id, data.branch_id, len(hist_base), json.dumps(new_hist), parent["memory"], parent["turn_counter"], n, n, parent["director_note"]))
-                q(conn, "UPDATE chats SET updated_at=? WHERE id=?", (ts(), chat_id))
-                conn.commit(); conn.close()
-            with_db_retry(_persist)
-            set_active_branch(chat_id, new_bid)
-            yield f"data: {json.dumps({'type':'done','branch_id':new_bid,'needs_memory':needs_mem})}\n\n"
+            yield f"data: {json.dumps(finish(full, reply.model))}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'type':'error','message':error_text(e)})}\n\n"
 
@@ -1077,13 +1115,19 @@ def undo(branch_id: str, user_id: str = Depends(require_user)):
 
 # ── MEMORY ────────────────────────────────────────────────────────────────────
 @app.post("/branches/{branch_id}/memory")
-def update_memory(branch_id: str, llm: list = Depends(llm_candidates),
+def update_memory(branch_id: str, data: Optional[MemoryCommit] = None, llm: list = Depends(llm_candidates),
                   x_use_rag: str = Header(default="false"), x_embed_token: str = Header(default=""),
+                  x_phase: str = Header(default=""),
                   user_id: str = Depends(require_user)):
     branch_owned(branch_id, user_id)
     b = get_branch_data(branch_id)
+    if x_phase == "prepare":
+        return {"messages": memory_prompt(b["history"], b["memory"], b["director_note"])}
     try:
-        new_mem, new_note = do_memory_update(b["history"], b["memory"], llm, user_id, b["director_note"])
+        if x_phase == "commit":
+            new_mem, new_note = parse_memory_reply(reply_text(data.reply if data else None), b["director_note"])
+        else:
+            new_mem, new_note = do_memory_update(b["history"], b["memory"], llm, user_id, b["director_note"])
         with branch_lock(branch_id):
             fresh = get_branch_data(branch_id)
             new_note = new_note if fresh["director_note"] == b["director_note"] else fresh["director_note"]
@@ -1162,10 +1206,12 @@ class EditUserMsg(BaseModel):
     branch_id: str
     visible_index: int  # index of the user message being edited
     new_content: str
+    reply: Optional[str] = None; served_by: str = ""
 
 @app.post("/chats/{chat_id}/edit-user")
 async def edit_user_message(chat_id: str, data: EditUserMsg,
                             llm: list = Depends(llm_candidates),
+                            x_phase: str = Header(default=""),
                             user_id: str = Depends(require_user)):
     chat_owned(chat_id, user_id)
     parent = get_branch_data(data.branch_id)
@@ -1185,6 +1231,24 @@ async def edit_user_message(chat_id: str, data: EditUserMsg,
 
     new_bid = str(uuid.uuid4()); n = ts()
 
+    def finish(full: str, served_by: str) -> dict:
+        new_hist = hist_base + [{"role": "assistant", "content": full, "model": served_by}]
+        needs_mem = parent["turn_counter"] % MEM_INTERVAL == 0
+        def _persist():
+            conn = get_db()
+            q(conn, "INSERT INTO branches VALUES (?,?,?,?,?,?,?,?,?,?)",
+              (new_bid, chat_id, data.branch_id, actual_idx, json.dumps(new_hist), parent["memory"], parent["turn_counter"], n, n, parent["director_note"]))
+            q(conn, "UPDATE chats SET updated_at=? WHERE id=?", (ts(), chat_id))
+            conn.commit(); conn.close()
+        with_db_retry(_persist)
+        set_active_branch(chat_id, new_bid)
+        return {'type': 'done', 'branch_id': new_bid, 'needs_memory': needs_mem}
+
+    if x_phase == "prepare":
+        return {"messages": send_hist}
+    if x_phase == "commit":
+        return finish(reply_text(data.reply), data.served_by)
+
     async def stream():
         full = ""
         try:
@@ -1199,17 +1263,7 @@ async def edit_user_message(chat_id: str, data: EditUserMsg,
                 if delta:
                     full += delta
                     yield f"data: {json.dumps({'type':'delta','content':delta})}\n\n"
-            new_hist = hist_base + [{"role": "assistant", "content": full, "model": reply.model}]
-            needs_mem = parent["turn_counter"] % MEM_INTERVAL == 0
-            def _persist():
-                conn = get_db()
-                q(conn, "INSERT INTO branches VALUES (?,?,?,?,?,?,?,?,?,?)",
-                  (new_bid, chat_id, data.branch_id, actual_idx, json.dumps(new_hist), parent["memory"], parent["turn_counter"], n, n, parent["director_note"]))
-                q(conn, "UPDATE chats SET updated_at=? WHERE id=?", (ts(), chat_id))
-                conn.commit(); conn.close()
-            with_db_retry(_persist)
-            set_active_branch(chat_id, new_bid)
-            yield f"data: {json.dumps({'type':'done','branch_id':new_bid,'needs_memory':needs_mem})}\n\n"
+            yield f"data: {json.dumps(finish(full, reply.model))}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'type':'error','message':error_text(e)})}\n\n"
 
@@ -1280,6 +1334,7 @@ def delete_ai_chat(chat_id: str, user_id: str = Depends(require_user)):
 @app.post("/ai-chats/{chat_id}/send")
 async def send_ai_message(chat_id: str, data: AIChatSendMsg,
                           llm: list = Depends(llm_candidates),
+                          x_phase: str = Header(default=""),
                           user_id: str = Depends(require_user)):
     c = ai_chat_owned(chat_id, user_id)
     history = json.loads(c["history"])
@@ -1288,6 +1343,18 @@ async def send_ai_message(chat_id: str, data: AIChatSendMsg,
 
     history.append({"role": "user", "content": ai_msg_content(data.content, data.images)})
     send_hist = build_send_history(history, "")
+
+    def finish(full: str) -> dict:
+        history.append({"role": "assistant", "content": full})
+        conn = get_db()
+        q(conn, "UPDATE ai_chats SET history=?,updated_at=? WHERE id=?", (json.dumps(history), ts(), chat_id))
+        conn.commit(); conn.close()
+        return {'type': 'done'}
+
+    if x_phase == "prepare":
+        return {"messages": send_hist}
+    if x_phase == "commit":
+        return finish(reply_text(data.reply))
 
     async def stream():
         full = ""
@@ -1302,11 +1369,7 @@ async def send_ai_message(chat_id: str, data: AIChatSendMsg,
                 if delta:
                     full += delta
                     yield f"data: {json.dumps({'type':'delta','content':delta})}\n\n"
-            history.append({"role": "assistant", "content": full})
-            conn = get_db()
-            q(conn, "UPDATE ai_chats SET history=?,updated_at=? WHERE id=?", (json.dumps(history), ts(), chat_id))
-            conn.commit(); conn.close()
-            yield f"data: {json.dumps({'type':'done'})}\n\n"
+            yield f"data: {json.dumps(finish(full))}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'type':'error','message':error_text(e)})}\n\n"
 

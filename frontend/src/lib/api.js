@@ -1,5 +1,6 @@
 import { ALL_PROVIDERS, PROVIDERS } from "./providers";
 import { activeRequest, CHAIN_KEY } from "./chain";
+import { ModelError, isBrowserSource, readSse, runSegments, splitSegments, streamCompletion } from "./browserModels";
 
 export { PROVIDERS };
 
@@ -100,8 +101,8 @@ export function pushSettingsSoon() {
   emitSyncPending();
 }
 
-function getHeaders() {
-  const { provider, model, token, fallbacks } = activeRequest();
+function getHeaders(req = activeRequest(), extra = {}) {
+  const { provider, model, token, fallbacks } = req;
   const useRag = localStorage.getItem("use_rag") === "true";
   const authToken = localStorage.getItem("auth_token") || "";
   // RAG embeddings always go through Gemini regardless of which provider is
@@ -117,6 +118,7 @@ function getHeaders() {
     "x-use-rag": String(useRag),
     "x-embed-token": embedToken,
     "x-auth-token": authToken,
+    ...extra,
   };
 }
 
@@ -161,10 +163,10 @@ async function fetchWithRetry(url, options) {
   }
 }
 
-async function request(method, path, body) {
+async function request(method, path, body, headers = getHeaders()) {
   const res = await fetchWithRetry(`${BASE}${path}`, {
     method,
-    headers: getHeaders(),
+    headers,
     body: body ? JSON.stringify(body) : undefined,
   });
   if (res.status === 401) clearSession();
@@ -174,6 +176,116 @@ async function request(method, path, body) {
   }
   return res.json();
 }
+
+// ── Model calls made from the browser ─────────────────────────────────────────
+// Sources with a `browserBase` (see providers.js) refuse requests from the server, so the browser calls them itself:
+// the server prepares the exact messages, the browser streams the reply, and the server saves it. Everything else
+// is unchanged: when no entry of the model order is a browser source, the plain server-side calls below are used.
+const candidates = () => {
+  const { provider, model, token, fallbacks } = activeRequest();
+  return [{ provider, model, token }, ...fallbacks];
+};
+const usesBrowser = () => candidates().some(c => isBrowserSource(c.provider));
+const asRequest = items => ({ provider: items[0].provider, model: items[0].model, token: items[0].token, fallbacks: items.slice(1) });
+const stepHeaders = (items, step) => getHeaders(asRequest(items), { "x-phase": step });
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+async function serverTurn(path, body, items, onDelta) {
+  const res = await fetchWithRetry(`${BASE}${path}`, { method: "POST", headers: getHeaders(asRequest(items)), body: JSON.stringify(body) });
+  if (!res.ok) throw new ModelError(`Request failed (${res.status})`);
+  let done = null;
+  let failure = null;
+  await readSse(res.body, data => {
+    try {
+      const evt = JSON.parse(data);
+      if (evt.type === "delta") onDelta(evt.content);
+      else if (evt.type === "done") done = evt;
+      else if (evt.type === "error") failure = new ModelError(evt.message);
+    } catch { /* keepalive or partial line */ }
+  });
+  if (failure) throw failure;
+  if (!done) throw new ModelError("The reply was cut off");
+  return done;
+}
+
+// The reply is already on screen, so saving it is retried before giving up.
+async function commitReply(path, body, items) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await request("POST", path, body, stepHeaders(items, "commit"));
+    } catch (err) {
+      if (attempt >= 2) throw new ModelError(`The reply arrived but could not be saved: ${err.message}`, { fatal: true });
+      await sleep(1500 * (attempt + 1));
+    }
+  }
+}
+
+async function browserTurn(path, body, items, onDelta) {
+  const { messages } = await request("POST", path, body, stepHeaders(items, "prepare"));
+  let failure = new ModelError("No model available");
+  for (const item of items) {
+    let reply;
+    try {
+      reply = await streamCompletion(item, messages, onDelta);
+    } catch (err) {
+      failure = err;
+      if (err.started) err.fatal = true;
+      if (err.fatal) throw err;
+      continue;
+    }
+    return commitReply(path, { ...body, reply, served_by: `${item.provider} / ${item.model}` }, items);
+  }
+  throw failure;
+}
+
+// Test chat: no prompt to prepare and nothing to save, so the browser just talks to the model.
+async function directTurn(messages, items, onDelta) {
+  let failure = new ModelError("No model available");
+  for (const item of items) {
+    try {
+      await streamCompletion(item, messages, onDelta);
+      return { type: "done" };
+    } catch (err) {
+      failure = err;
+      if (err.started) err.fatal = true;
+      if (err.fatal) throw err;
+    }
+  }
+  throw failure;
+}
+
+async function updateMemoryViaBrowser(branchId) {
+  const path = `/branches/${branchId}/memory`;
+  let failure = new ModelError("No model available");
+  for (const segment of splitSegments(candidates())) {
+    try {
+      if (!segment.browser) return await request("POST", path, null, getHeaders(asRequest(segment.items)));
+      const { messages } = await request("POST", path, null, stepHeaders(segment.items, "prepare"));
+      for (const item of segment.items) {
+        let reply;
+        try { reply = await streamCompletion(item, messages, () => {}); } catch (err) { failure = err; continue; }
+        return await request("POST", path, { reply }, stepHeaders(segment.items, "commit"));
+      }
+    } catch (err) {
+      failure = err;
+    }
+  }
+  throw failure;
+}
+
+const legacyStream = (path, failure, body, onDelta, onDone, onError) => fetchWithRetry(`${BASE}${path}`, {
+  method: "POST",
+  headers: getHeaders(),
+  body: JSON.stringify(body),
+}).then((res) => {
+  if (!res.ok) throw new Error(failure);
+  return readStream(res.body, onDelta, onDone, onError);
+}).catch(onError);
+
+const turnStream = (path, failure, body, onDelta, onDone, onError) => (usesBrowser()
+  ? runSegments(splitSegments(candidates()), (items, delta) => browserTurn(path, body, items, delta),
+    (items, delta) => serverTurn(path, body, items, delta), onDelta, onDone, onError)
+  : legacyStream(path, failure, body, onDelta, onDone, onError));
 
 export const api = {
   // Auth
@@ -211,59 +323,26 @@ export const api = {
   undo: (branchId) => request("POST", `/branches/${branchId}/undo`),
 
   // Test chat — bare model, no system prompt
-  testChatStream: (messages, onDelta, onDone, onError) => {
-    return fetchWithRetry(`${BASE}/test-chat`, {
-      method: "POST",
-      headers: getHeaders(),
-      body: JSON.stringify({ messages }),
-    }).then((res) => {
-      if (!res.ok) throw new Error("Test chat failed");
-      return readStream(res.body, onDelta, onDone, onError);
-    }).catch(onError);
-  },
+  testChatStream: (messages, onDelta, onDone, onError) => (usesBrowser()
+    ? runSegments(splitSegments(candidates()), (items, delta) => directTurn(messages, items, delta),
+      (items, delta) => serverTurn("/test-chat", { messages }, items, delta), onDelta, onDone, onError)
+    : legacyStream("/test-chat", "Test chat failed", { messages }, onDelta, onDone, onError)),
 
   // Edit message in branch history (Luna's messages — in place)
   editMessage: (branchId, visibleIndex, newContent) =>
     request("POST", `/branches/${branchId}/edit-message`, { visible_index: visibleIndex, new_content: newContent }),
 
   // Edit user message — streaming, creates new branch
-  editUserStream: (chatId, body, onDelta, onDone, onError) => {
-    return fetchWithRetry(`${BASE}/chats/${chatId}/edit-user`, {
-      method: "POST",
-      headers: getHeaders(),
-      body: JSON.stringify(body),
-    }).then((res) => {
-      if (!res.ok) throw new Error("Edit failed");
-      return readStream(res.body, onDelta, onDone, onError);
-    }).catch(onError);
-  },
+  editUserStream: (chatId, ...rest) => turnStream(`/chats/${chatId}/edit-user`, "Edit failed", ...rest),
 
   // Memory
-  updateMemory: (branchId) => request("POST", `/branches/${branchId}/memory`),
+  updateMemory: (branchId) => (usesBrowser() ? updateMemoryViaBrowser(branchId) : request("POST", `/branches/${branchId}/memory`)),
 
   // Streaming send
-  sendStream: (chatId, body, onDelta, onDone, onError) => {
-    return fetchWithRetry(`${BASE}/chats/${chatId}/send`, {
-      method: "POST",
-      headers: getHeaders(),
-      body: JSON.stringify(body),
-    }).then((res) => {
-      if (!res.ok) throw new Error("Send failed");
-      return readStream(res.body, onDelta, onDone, onError);
-    }).catch(onError);
-  },
+  sendStream: (chatId, ...rest) => turnStream(`/chats/${chatId}/send`, "Send failed", ...rest),
 
   // Streaming retry
-  retryStream: (chatId, body, onDelta, onDone, onError) => {
-    return fetchWithRetry(`${BASE}/chats/${chatId}/retry`, {
-      method: "POST",
-      headers: getHeaders(),
-      body: JSON.stringify(body),
-    }).then((res) => {
-      if (!res.ok) throw new Error("Retry failed");
-      return readStream(res.body, onDelta, onDone, onError);
-    }).catch(onError);
-  },
+  retryStream: (chatId, ...rest) => turnStream(`/chats/${chatId}/retry`, "Retry failed", ...rest),
 
   // AI Chat (plain assistant, no bot/persona)
   getAIChats: () => request("GET", "/ai-chats"),
@@ -271,16 +350,7 @@ export const api = {
   getAIChat: (id) => request("GET", `/ai-chats/${id}`),
   renameAIChat: (id, name) => request("PUT", `/ai-chats/${id}/rename`, { name }),
   deleteAIChat: (id) => request("DELETE", `/ai-chats/${id}`),
-  sendAIChatStream: (chatId, body, onDelta, onDone, onError) => {
-    return fetchWithRetry(`${BASE}/ai-chats/${chatId}/send`, {
-      method: "POST",
-      headers: getHeaders(),
-      body: JSON.stringify(body),
-    }).then((res) => {
-      if (!res.ok) throw new Error("Send failed");
-      return readStream(res.body, onDelta, onDone, onError);
-    }).catch(onError);
-  },
+  sendAIChatStream: (chatId, ...rest) => turnStream(`/ai-chats/${chatId}/send`, "Send failed", ...rest),
 };
 
 async function readStream(body, onDelta, onDone, onError) {
