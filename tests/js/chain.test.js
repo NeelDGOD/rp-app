@@ -156,12 +156,11 @@ const GLM = PROVIDERS.budsai.presets.find(p => p.group).group;
 const glmTile = () => addGroup([], { provider: "budsai", name: "GLM 5.3", models: GLM })[0];
 const ids2 = req => [req.model, ...req.fallbacks.map(f => f.model)];
 
-test("the BudsAI GLM preset puts the best model first and keeps the untested-or-failing ones switched off", () => {
+test("the BudsAI GLM preset holds only the ids verified to be GLM, best first, all switched on", () => {
   const tile = glmTile();
-  assert.equal(tile.variants.length, 7);
+  assert.deepEqual(tile.variants.map(v => v.model), ["glm-5-3-flash", "glm-5-3"]);
   assert.deepEqual(entryModels(tile), ["glm-5-3-flash", "glm-5-3"]);
-  assert.deepEqual(tile.variants.map(v => v.model).slice(0, 2), ["glm-5-3-flash", "glm-5-3"]);
-  assert.equal(new Set(tile.variants.map(v => v.id)).size, 7, "variant ids are unique");
+  assert.equal(new Set(tile.variants.map(v => v.id)).size, 2, "variant ids are unique");
 });
 
 test("a group is tried in its own order, between the entries around it", () => {
@@ -176,9 +175,9 @@ test("a group is tried in its own order, between the entries around it", () => {
 });
 
 test("switched-off ids are skipped; a group with everything off is skipped entirely", () => {
-  const tile = glmTile();
+  const tile = addGroup([], { provider: "budsai", name: "t", models: [{ model: "a" }, { model: "b", enabled: false }, { model: "c" }] })[0];
   const req = chainToRequest([tile, { id: "z", provider: "groq", model: "g1", name: "" }], keys("budsai", "groq"), true);
-  assert.deepEqual(ids2(req), ["glm-5-3-flash", "glm-5-3", "g1"]);
+  assert.deepEqual(ids2(req), ["a", "c", "g1"]);
   const allOff = { ...tile, variants: tile.variants.map(v => ({ ...v, enabled: false })) };
   const next = chainToRequest([allOff, { id: "z", provider: "groq", model: "g1", name: "" }], keys("budsai", "groq"), true);
   assert.deepEqual([next.provider, next.model, next.fallbacks.length], ["groq", "g1", 0]);
@@ -206,9 +205,9 @@ test("editing a group: add, switch off, change, remove and reorder its ids", () 
   const id = chain[0].id;
   const models = () => chain[0].variants.map(v => v.model).join("|");
   chain = addVariant(chain, id, "  extra  ");
-  assert.equal(chain[0].variants.length, 8);
-  assert.equal(chain[0].variants[7].model, "extra");
-  chain = moveVariant(chain, id, 7, 0);
+  assert.equal(chain[0].variants.length, 3);
+  assert.equal(chain[0].variants[2].model, "extra");
+  chain = moveVariant(chain, id, 2, 0);
   assert.equal(chain[0].variants[0].model, "extra");
   assert.deepEqual(chainToRequest(chain, keys("budsai"), true).model, "extra", "moving an id to the top makes it the first one tried");
   const first = chain[0].variants[0].id;
@@ -217,7 +216,7 @@ test("editing a group: add, switch off, change, remove and reorder its ids", () 
   chain = updateVariant(chain, id, first, { model: "renamed" });
   assert.equal(chain[0].variants[0].model, "renamed");
   chain = removeVariant(chain, id, first);
-  assert.equal(chain[0].variants.length, 7);
+  assert.equal(chain[0].variants.length, 2);
   assert.ok(!models().includes("renamed"));
   const other = addEntry([], { provider: "puter", model: "m" });
   assert.deepEqual(addVariant(other, other[0].id, "x"), other, "single entries ignore variant edits");

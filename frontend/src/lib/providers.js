@@ -83,16 +83,11 @@ export const PROVIDERS = {
     modelHint: "Model id from apichat.budsin.dev/pricing. Avoid ids priced at $6 or more per 1M tokens", modelExample: "glm-5-3-flash",
     presets: [
       {
-        label: "GLM 5.3 (7 models, best first)",
+        label: "GLM 5.3 (verified, best first)",
         name: "GLM 5.3",
         group: [
           { model: "glm-5-3-flash" },
           { model: "glm-5-3" },
-          { model: "zai/glm-5.3-flash", enabled: false },
-          { model: "zai/glm-5.3", enabled: false },
-          { model: "zai-org/glm-5.3-flash", enabled: false },
-          { model: "zai-org/glm-5.3", enabled: false },
-          { model: "kovaksai/glm-5.3", enabled: false },
         ],
       },
       { label: "DeepSeek Chat", model: "deepseek-chat" },
