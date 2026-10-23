@@ -136,9 +136,7 @@ def with_db_retry(fn, attempts=3, delay=0.3):
                 continue
             raise
 
-def init_db():
-    conn = get_db()
-    conn.executescript("""
+SCHEMA = """
         CREATE TABLE IF NOT EXISTS users (
             id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE,
             password_hash TEXT NOT NULL, created_at TEXT NOT NULL
@@ -190,12 +188,36 @@ def init_db():
         CREATE TABLE IF NOT EXISTS chat_active_branch (
             chat_id TEXT PRIMARY KEY, branch_id TEXT NOT NULL
         );
-    """)
+    """
+
+def init_db():
+    conn = get_db()
+    for statement in SCHEMA.split(";"):
+        if statement.strip():
+            conn.execute(statement)
     conn.commit()
     conn.close()
 
-# Turso can stay unavailable for several seconds around a deploy, so startup waits it out instead of exiting.
-with_db_retry(init_db, attempts=8, delay=1.0)
+def ensure_schema(init=init_db, attempts=8, delay=1.0) -> bool:
+    """Create the tables if they are missing. Turso can refuse requests for a while around a deploy, and a database
+    that has been used already has its tables, so a failure here must not stop the server from starting."""
+    try:
+        with_db_retry(init, attempts=attempts, delay=delay)
+        return True
+    except Exception as e:
+        print(f"Schema check failed, starting anyway: {e}", flush=True)
+        return False
+
+def retry_schema_in_background(init=init_db, every=30, tries=40):
+    def run():
+        for _ in range(tries):
+            time.sleep(every)
+            if ensure_schema(init, attempts=1):
+                return
+    threading.Thread(target=run, daemon=True).start()
+
+if not ensure_schema():
+    retry_schema_in_background()
 
 # ── AUTH ──────────────────────────────────────────────────────────────────────
 def hash_password(pw: str) -> str:
