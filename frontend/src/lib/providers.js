@@ -113,7 +113,6 @@ export const ALL_PROVIDERS = {
     modelExample: "deepseek/deepseek-v4-flash",
     presets: [
       { label: "DeepSeek V4 Flash (0.5x)", model: "deepseek/deepseek-v4-flash" },
-      { label: "DeepSeek V4 Pro (0.7x)", model: "deepseek/deepseek-v4-pro" },
       { label: "DeepSeek V4.1 Flash (0.8x)", model: "deepseek/deepseek-v4.1-flash" },
       { label: "GLM 5.3 Flash (0.7x)", model: "z-ai/glm-5.3-flash" },
     ],
