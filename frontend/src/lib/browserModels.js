@@ -97,11 +97,12 @@ function describeFailure(status, text) {
 // A source that allows one request at a time answers a second one with 429 "retry after 1s". That is an instruction to
 // wait, so the call waits and tries again (the app open on two devices, say). Each further refusal doubles the wait, so
 // a source that stays busy is not hammered; every refused attempt can count against its limit too.
-function retryAfterMs(res, text, refusals) {
+function refusalSeconds(res, text) {
   const header = Number(res.headers.get("retry-after"));
-  const seconds = header > 0 ? header : Number(/retry after (\d+(?:\.\d+)?)\s*s/i.exec(text)?.[1]) || 1;
-  return Math.min(15000, Math.max(1000, seconds * 1000) * 2 ** Math.min(refusals, 4)) + Math.random() * 400;
+  return header > 0 ? header : Number(/retry after (\d+(?:\.\d+)?)\s*s/i.exec(text)?.[1]) || 1;
 }
+
+const backoffMs = (seconds, refusals) => Math.min(15000, Math.max(1000, seconds * 1000) * 2 ** Math.min(refusals, 4)) + Math.random() * 400;
 
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -133,15 +134,24 @@ function inQueue(provider, priority, task) {
 }
 
 // One streamed chat completion straight from the browser. Resolves with the full reply text. The error says whether
-// text had already been shown (`started`).
-export function streamCompletion(candidate, messages, onDelta, options = {}) {
-  return inQueue(candidate.provider, options.priority ?? 0, () => runCompletion(candidate, messages, onDelta, options));
+// text had already been shown (`started`). A refused attempt (429) waits OUTSIDE the queue, so whatever is waiting
+// behind it (a reply, while this is a memory update) goes first, and then it queues again with its own priority.
+export async function streamCompletion(candidate, messages, onDelta, options = {}) {
+  const { priority = 0, maxWaitMs = 90000, sleep = pause } = options;
+  let waited = 0;
+  for (let refusals = 0; ; refusals++) {
+    const outcome = await inQueue(candidate.provider, priority, () => attempt(candidate, messages, onDelta, options));
+    if (!outcome.refused) return outcome.text;
+    const wait = backoffMs(outcome.refused.seconds, refusals);
+    if (waited + wait > maxWaitMs) throw new ModelError(describeFailure(429, outcome.refused.body), { rateLimited: true });
+    await sleep(wait);
+    waited += wait;
+  }
 }
 
-// Reasoning models think for a long time, and some relays hold the whole response until the model has finished, so the
-// first response may take minutes (firstByteMs); once it is arriving, silence of idleMs means it has stalled.
-async function runCompletion({ provider, model, token }, messages, onDelta,
-  { fetchImpl = fetch, idleMs = 60000, firstByteMs = 240000, maxWaitMs = 90000, sleep = pause } = {}) {
+// One try. Reasoning models think for a long time, and some relays hold the whole response until the model has
+// finished, so the first response may take minutes (firstByteMs); once it is arriving, silence of idleMs is a stall.
+async function attempt({ provider, model, token }, messages, onDelta, { fetchImpl = fetch, idleMs = 60000, firstByteMs = 240000 } = {}) {
   const controller = new AbortController();
   let timer;
   const alive = (ms = idleMs) => {
@@ -156,21 +166,15 @@ async function runCompletion({ provider, model, token }, messages, onDelta,
     onDelta(delta);
   };
   try {
-    let res;
-    for (let waited = 0, refusals = 0; ; refusals++) {
-      res = await fetchImpl(`${PROVIDERS[provider].browserBase}/chat/completions`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token.trim()}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ model, messages, stream: true }),
-        signal: controller.signal,
-      });
-      if (res.status !== 429) break;
-      const failure = await res.text().catch(() => "");
-      const wait = retryAfterMs(res, failure, refusals);
-      if (waited + wait > maxWaitMs) throw new ModelError(describeFailure(429, failure), { rateLimited: true });
-      await sleep(wait);
-      waited += wait;
-      alive(firstByteMs);
+    const res = await fetchImpl(`${PROVIDERS[provider].browserBase}/chat/completions`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token.trim()}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ model, messages, stream: true }),
+      signal: controller.signal,
+    });
+    if (res.status === 429) {
+      const body = await res.text().catch(() => "");
+      return { refused: { seconds: refusalSeconds(res, body), body } };
     }
     alive();
     if (!res.ok) throw new ModelError(describeFailure(res.status, await res.text().catch(() => "")));
@@ -192,5 +196,5 @@ async function runCompletion({ provider, model, token }, messages, onDelta,
     clearTimeout(timer);
   }
   if (!text.trim()) throw new ModelError("The model returned an empty reply");
-  return text;
+  return { text };
 }

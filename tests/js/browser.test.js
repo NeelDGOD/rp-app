@@ -301,3 +301,34 @@ test("a slow first response is waited for, and only silence after it starts coun
   const { text } = await run("m", slow, { firstByteMs: 1000, idleMs: 30 });
   assert.equal(text, "late");
 });
+
+test("a refused memory update waits outside the queue, so a reply that arrives meanwhile goes first, and the memory update is not dropped", async () => {
+  const order = [];
+  let memoryRefusals = 0;
+  let releaseSleep;
+  const sleepGate = new Promise(resolve => { releaseSleep = resolve; });
+  const fetchImpl = async (url, options) => {
+    const label = modelOf(options);
+    order.push(label);
+    if (label === "memory" && memoryRefusals++ === 0) return failure(429, limited);
+    return streamResponse(sse(label));
+  };
+  const memory = run("memory", fetchImpl, { priority: 1, maxWaitMs: 600000, sleep: () => sleepGate });
+  await later(20);
+  const reply = run("reply", fetchImpl);
+  const replyResult = await reply;
+  assert.equal(replyResult.text, "reply", "the reply was not stuck behind the waiting memory update");
+  assert.deepEqual(order, ["memory", "reply"], "the memory update is waiting, not holding the slot");
+  releaseSleep();
+  const memoryResult = await memory;
+  assert.equal(memoryResult.text, "memory");
+  assert.deepEqual(order, ["memory", "reply", "memory"], "and it asked again once it could");
+});
+
+test("a memory update keeps trying through many refusals instead of giving up", async () => {
+  let calls = 0;
+  const fetchImpl = async () => (++calls <= 12 ? failure(429, limited) : streamResponse(sse("done")));
+  const { text } = await run("m", fetchImpl, { priority: 1, maxWaitMs: 600000, sleep: async () => {} });
+  assert.equal(text, "done");
+  assert.equal(calls, 13);
+});

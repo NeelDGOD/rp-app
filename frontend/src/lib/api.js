@@ -235,7 +235,7 @@ const directTurn = (messages, items, onDelta) =>
     return { type: "done" };
   });
 
-// A memory update is not worth holding up the next message for, so it gives up on a busy source quickly.
+// A memory update waits behind replies and is never dropped: it keeps retrying for up to ten minutes.
 async function updateMemoryViaBrowser(branchId) {
   const path = `/branches/${branchId}/memory`;
   let failure = new ModelError("No model available");
@@ -244,7 +244,7 @@ async function updateMemoryViaBrowser(branchId) {
       if (!segment.browser) return await request("POST", path, null, getHeaders(asRequest(segment.items)));
       const { messages } = await request("POST", path, null, stepHeaders(segment.items, "prepare"));
       return await tryInOrder(segment.items, async item => {
-        const reply = await streamCompletion(item, messages, () => {}, { priority: 1, maxWaitMs: 20000 });
+        const reply = await streamCompletion(item, messages, () => {}, { priority: 1, maxWaitMs: 600000 });
         return request("POST", path, { reply }, stepHeaders(segment.items, "commit")).catch(err => { throw new ModelError(err.message, { fatal: true }); });
       });
     } catch (err) {
