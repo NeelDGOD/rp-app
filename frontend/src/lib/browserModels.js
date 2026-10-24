@@ -3,20 +3,19 @@
 // other source is still called by the server. The model order is kept: consecutive entries that share a side form a
 // segment, and segments are tried one after the other until one answers before any text has been shown.
 import { PROVIDERS } from "./providers";
+import { DEFAULT_RETRIES } from "./chain";
 
 export const isBrowserSource = provider => !!PROVIDERS[provider]?.browserBase;
 
 export class ModelError extends Error {
-  constructor(message, { started = false, fatal = false, rateLimited = false } = {}) {
+  constructor(message, { started = false, fatal = false } = {}) {
     super(message);
     this.started = started;
     this.fatal = fatal;
-    this.rateLimited = rateLimited;
   }
 }
 
-// Tries a segment's models in order. The models of one source share its account limit, so once a source is rate
-// limited (after waiting for it) its other models are not asked; the next segment gets its turn instead.
+// Tries a segment's models in order; each has used up its own retries by the time the next one is asked.
 export async function tryInOrder(items, attempt) {
   let failure = new ModelError("No model available");
   for (const item of items) {
@@ -24,7 +23,7 @@ export async function tryInOrder(items, attempt) {
       return await attempt(item);
     } catch (err) {
       if (err.started) err.fatal = true;
-      if (err.fatal || err.rateLimited) throw err;
+      if (err.fatal) throw err;
       failure = err;
     }
   }
@@ -134,18 +133,17 @@ function inQueue(provider, priority, task) {
 }
 
 // One streamed chat completion straight from the browser. Resolves with the full reply text. The error says whether
-// text had already been shown (`started`). A refused attempt (429) waits OUTSIDE the queue, so whatever is waiting
-// behind it (a reply, while this is a memory update) goes first, and then it queues again with its own priority.
+// text had already been shown (`started`). When the source says it is busy (429) the call asks again, as many times as
+// the entry's `retries` (the option can override it). A refused attempt waits OUTSIDE the queue, so whatever is
+// waiting behind it (a reply, while this is a memory update) goes first, and then it queues again with its priority.
 export async function streamCompletion(candidate, messages, onDelta, options = {}) {
-  const { priority = 0, maxWaitMs = 90000, sleep = pause } = options;
-  let waited = 0;
+  const { priority = 0, sleep = pause } = options;
+  const retries = options.retries ?? candidate.retries ?? DEFAULT_RETRIES;
   for (let refusals = 0; ; refusals++) {
     const outcome = await inQueue(candidate.provider, priority, () => attempt(candidate, messages, onDelta, options));
     if (!outcome.refused) return outcome.text;
-    const wait = backoffMs(outcome.refused.seconds, refusals);
-    if (waited + wait > maxWaitMs) throw new ModelError(describeFailure(429, outcome.refused.body), { rateLimited: true });
-    await sleep(wait);
-    waited += wait;
+    if (refusals >= retries) throw new ModelError(describeFailure(429, outcome.refused.body));
+    await sleep(backoffMs(outcome.refused.seconds, refusals));
   }
 }
 
@@ -191,7 +189,7 @@ async function attempt({ provider, model, token }, messages, onDelta, { fetchImp
     }
   } catch (err) {
     const message = err.name === "AbortError" ? "No answer in time" : err instanceof ModelError ? err.message : `Couldn't reach ${PROVIDERS[provider].label} from the browser (${err.message})`;
-    throw new ModelError(message, { started: text.length > 0, rateLimited: err.rateLimited === true });
+    throw new ModelError(message, { started: text.length > 0 });
   } finally {
     clearTimeout(timer);
   }

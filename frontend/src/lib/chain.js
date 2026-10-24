@@ -6,6 +6,10 @@ import { ALL_PROVIDERS, PROVIDERS, DEFAULT_PROVIDER } from "./providers";
 export const CHAIN_KEY = "model_chain";
 // A request carries every key it may need in headers, so the list is capped to keep them small.
 export const MAX_CHAIN = 20;
+// How many times an entry asks again when its source says it is busy (a 429) before the next entry gets its turn.
+export const DEFAULT_RETRIES = 3;
+export const MAX_RETRIES = 10;
+export const normalizeRetries = value => (Number.isInteger(value) ? Math.max(0, Math.min(MAX_RETRIES, value)) : DEFAULT_RETRIES);
 
 const isEntry = e => e && typeof e.model === "string" && PROVIDERS[e.provider];
 
@@ -17,7 +21,7 @@ export const newEntryId = () => `e${Date.now().toString(36)}${(idCounter++).toSt
 const expandGroup = e => (Array.isArray(e.variants)
   ? e.variants
     .filter(v => v && typeof v.model === "string" && v.model.trim() && v.enabled !== false)
-    .map((v, i) => ({ id: `${e.id || "group"}-${v.id || i}`, provider: e.provider, model: v.model.trim(), name: "" }))
+    .map((v, i) => ({ id: `${e.id || "group"}-${v.id || i}`, provider: e.provider, model: v.model.trim(), name: "", retries: e.retries }))
   : [e]);
 
 // What the app used before the list existed: the selected source and its model, then the saved
@@ -42,7 +46,7 @@ export function readChain(storage = localStorage) {
       return parsed
         .flatMap(e => (e && typeof e === "object" ? expandGroup(e) : []))
         .filter(isEntry)
-        .map((e, i) => ({ id: e.id || `entry-${i}`, provider: e.provider, model: e.model, name: e.name || "" }));
+        .map((e, i) => ({ id: e.id || `entry-${i}`, provider: e.provider, model: e.model, name: e.name || "", retries: normalizeRetries(e.retries) }));
     }
   } catch { /* fall through to the starting list */ }
   return legacyChain(storage);
@@ -62,11 +66,11 @@ export function writeChain(chain, storage = localStorage) {
 export function chainToRequest(chain, tokenOf, useFallbacks) {
   const usable = chain
     .filter(e => PROVIDERS[e.provider] && e.model.trim() && tokenOf(e.provider))
-    .map(e => ({ provider: e.provider, model: e.model, token: tokenOf(e.provider) }));
+    .map(e => ({ provider: e.provider, model: e.model, token: tokenOf(e.provider), retries: normalizeRetries(e.retries) }));
   const picked = (useFallbacks ? usable : usable.slice(0, 1)).slice(0, MAX_CHAIN);
   if (!picked.length) {
     const e = chain[0] || { provider: DEFAULT_PROVIDER, model: PROVIDERS[DEFAULT_PROVIDER].defaultModel };
-    return { provider: e.provider, model: e.model, token: tokenOf(e.provider) || "", fallbacks: [] };
+    return { provider: e.provider, model: e.model, token: tokenOf(e.provider) || "", retries: normalizeRetries(e.retries), fallbacks: [] };
   }
   const [first, ...rest] = picked;
   return { ...first, fallbacks: rest };
@@ -82,8 +86,8 @@ export function activeRequest(storage = localStorage) {
   );
 }
 
-export function addEntry(chain, { provider, model, name = "" }) {
-  return [...chain, { id: newEntryId(), provider, model: model.trim(), name: name.trim() }];
+export function addEntry(chain, { provider, model, name = "", retries = DEFAULT_RETRIES }) {
+  return [...chain, { id: newEntryId(), provider, model: model.trim(), name: name.trim(), retries: normalizeRetries(retries) }];
 }
 
 export function updateEntry(chain, id, patch) {

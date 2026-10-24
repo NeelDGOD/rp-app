@@ -1,13 +1,15 @@
 import React, { useEffect, useState } from "react";
 import { Check, GripVertical, Pencil, Plus, X } from "lucide-react";
 import { PROVIDERS, pushSettingsSoon, onSettingsPulled } from "../lib/api";
-import { addEntry, moveEntry, readChain, removeEntry, updateEntry, writeChain } from "../lib/chain";
+import { addEntry, moveEntry, normalizeRetries, readChain, removeEntry, updateEntry, writeChain } from "../lib/chain";
+import { isBrowserSource } from "../lib/browserModels";
 import SortableList from "./SortableList";
 import ToggleSetting from "./ToggleSetting";
 
 const hasKey = provider => !!localStorage.getItem(PROVIDERS[provider].tokenKey);
 const fallbackOn = () => localStorage.getItem("use_fallbacks") === "true";
 const EMPTY_FORM = { provider: "puter", model: "", name: "" };
+const RETRY_CHOICES = [0, 1, 2, 3, 4, 5, 6, 8, 10];
 
 function SourceSelect({ id, value, onChange }) {
   return (
@@ -93,6 +95,16 @@ export default function ModelChain() {
                     <input id={`mid-${e.id}`} className="input input-mono" value={e.model} placeholder={PROVIDERS[e.provider].modelExample}
                       onChange={ev => commit(updateEntry(chain, e.id, { model: ev.target.value }))} />
                   </div>
+                  {isBrowserSource(e.provider) && (
+                    <div className="field">
+                      <label className="field-label" htmlFor={`retry-${e.id}`}>Retries when {PROVIDERS[e.provider].label} is busy</label>
+                      <select id={`retry-${e.id}`} className="input" value={normalizeRetries(e.retries)}
+                        onChange={ev => commit(updateEntry(chain, e.id, { retries: Number(ev.target.value) }))}>
+                        {RETRY_CHOICES.map(n => <option key={n} value={n}>{n === 0 ? "None, go to the next model" : n === 1 ? "1 retry" : `${n} retries`}</option>)}
+                      </select>
+                      <div className="field-hint">Each retry waits longer than the last (1, 2, 4, 8, then 15 seconds). After the last one, the next model in the list is tried.</div>
+                    </div>
+                  )}
                   <div className="field">
                     <label className="field-label" htmlFor={`nick-${e.id}`}>Nickname (optional)</label>
                     <input id={`nick-${e.id}`} className="input" value={e.name} placeholder="e.g. V4 Pro"

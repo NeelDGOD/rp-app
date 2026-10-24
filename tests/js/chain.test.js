@@ -1,7 +1,7 @@
 // Tests for frontend/src/lib/chain.js (the model order list). Run: tests/js/run.sh
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readChain, writeChain, chainToRequest, activeRequest, addEntry, updateEntry, removeEntry, moveEntry, MAX_CHAIN, CHAIN_KEY } from "../../frontend/src/lib/chain.js";
+import { readChain, writeChain, chainToRequest, activeRequest, addEntry, updateEntry, removeEntry, moveEntry, normalizeRetries, DEFAULT_RETRIES, MAX_RETRIES, MAX_CHAIN, CHAIN_KEY } from "../../frontend/src/lib/chain.js";
 import { PROVIDERS } from "../../frontend/src/lib/providers.js";
 
 const store = (obj = {}) => ({ getItem: k => (k in obj ? obj[k] : null), setItem: (k, v) => { obj[k] = String(v); }, data: obj });
@@ -211,4 +211,32 @@ test("a switched-off source is never sent, and unknown names are still dropped o
   const s = store({ [CHAIN_KEY]: JSON.stringify([{ id: "x", provider: "nope", model: "m" }]) });
   writeChain([], s);
   assert.deepEqual(JSON.parse(s.data[CHAIN_KEY]), []);
+});
+
+// ---- retries per entry ------------------------------------------------------------------------------------------
+test("every entry has a retry count: 3 by default, always a whole number from 0 to 10", () => {
+  assert.equal(DEFAULT_RETRIES, 3);
+  assert.deepEqual([undefined, null, "4", 2.5, -1, 0, 7, 99].map(normalizeRetries), [3, 3, 3, 3, 0, 0, 7, MAX_RETRIES]);
+  assert.equal(addEntry([], { provider: "budsai", model: "m" })[0].retries, 3);
+  assert.equal(addEntry([], { provider: "budsai", model: "m", retries: 5 })[0].retries, 5);
+});
+
+test("a saved list without retry counts gets the default; saved counts survive a reload and an edit", () => {
+  const s = store({ [CHAIN_KEY]: JSON.stringify([{ id: "a", provider: "budsai", model: "m1" }, { id: "b", provider: "budsai", model: "m2", retries: 6 }]) });
+  assert.deepEqual(readChain(s).map(e => e.retries), [3, 6]);
+  const chain = updateEntry(readChain(s), "a", { retries: 1 });
+  writeChain(chain, s);
+  assert.deepEqual(readChain(s).map(e => e.retries), [1, 6]);
+});
+
+test("each entry's retry count travels with it into the request", () => {
+  const chain = [{ id: "a", provider: "budsai", model: "m1", name: "", retries: 1 }, { id: "b", provider: "budsai", model: "m2", name: "", retries: 8 }, { id: "c", provider: "puter", model: "p", name: "" }];
+  const req = chainToRequest(chain, keys("budsai", "puter"), true);
+  assert.equal(req.retries, 1);
+  assert.deepEqual(req.fallbacks.map(f => f.retries), [8, 3]);
+});
+
+test("a tile converted from the older version keeps its retry count", () => {
+  const s = store({ [CHAIN_KEY]: JSON.stringify([{ id: "t", provider: "budsai", model: "", retries: 5, variants: [{ id: "v1", model: "m1", enabled: true }] }]) });
+  assert.equal(readChain(s)[0].retries, 5);
 });

@@ -101,18 +101,44 @@ test("the Retry-After header is honoured, and no single wait is longer than 15 s
   assert.ok(waits[1] >= 15000 && waits[1] <= 15400, "a huge value is capped at 15 seconds");
 });
 
-test("a source that stays rate limited is given up on after the maximum wait, and marked as rate limited", async () => {
+test("an entry asks again as many times as its retries, then gives up with the source's own message", async () => {
   let calls = 0;
-  await assert.rejects(run("m", async () => { calls++; return failure(429, limited); }, { sleep: async () => {}, maxWaitMs: 5000 }),
-    e => e instanceof ModelError && e.rateLimited === true && /rate limit exceeded/.test(e.message) && /429/.test(e.message) && e.started === false);
-  assert.ok(calls >= 2 && calls <= 4, `kept trying for a while, but not forever: ${calls} calls`);
+  await assert.rejects(run("m", async () => { calls++; return failure(429, limited); }, { sleep: async () => {}, retries: 2 }),
+    e => e instanceof ModelError && /rate limit exceeded/.test(e.message) && /429/.test(e.message) && e.started === false);
+  assert.equal(calls, 3, "the first try plus 2 retries");
 });
 
-test("the models of a rate-limited source are not asked again, the next segment gets its turn", async () => {
+test("the retry count can be chosen: none, or many", async () => {
+  let calls = 0;
+  await assert.rejects(run("m", async () => { calls++; return failure(429, limited); }, { sleep: async () => {}, retries: 0 }));
+  assert.equal(calls, 1, "0 retries: one try, then the next model");
+  calls = 0;
+  const fetchImpl = async () => (++calls <= 6 ? failure(429, limited) : streamResponse(sse("ok")));
+  const { text } = await run("m", fetchImpl, { sleep: async () => {}, retries: 8 });
+  assert.equal(text, "ok");
+  assert.equal(calls, 7);
+});
+
+test("an entry's own retries setting is used, three when it has none", async () => {
+  const count = async candidate => {
+    let calls = 0;
+    await streamCompletion(candidate, [{ role: "user", content: "hi" }], () => {}, { fetchImpl: async () => { calls++; return failure(429, limited); }, sleep: async () => {} }).catch(() => {});
+    return calls;
+  };
+  assert.equal(await count({ ...item("budsai", "m"), retries: 1 }), 2);
+  assert.equal(await count({ ...item("budsai", "m"), retries: 5 }), 6);
+  assert.equal(await count(item("budsai", "m")), 4, "the default is 3 retries");
+});
+
+test("after the retries are used up the next model of the same source still gets its own turn", async () => {
   const asked = [];
-  await assert.rejects(tryInOrder([item("budsai", "a"), item("budsai", "b")], async it => { asked.push(it.model); throw new ModelError("busy", { rateLimited: true }); }),
-    e => e.rateLimited === true);
-  assert.deepEqual(asked, ["a"], "the second model of the same source is skipped");
+  const result = await tryInOrder([item("budsai", "a"), item("budsai", "b")], async it => {
+    asked.push(it.model);
+    if (it.model === "a") throw new ModelError("busy after 3 retries");
+    return "answered";
+  });
+  assert.equal(result, "answered");
+  assert.deepEqual(asked, ["a", "b"]);
 });
 
 test("an ordinary failure moves on to the next model of the same source", async () => {
@@ -313,7 +339,7 @@ test("a refused memory update waits outside the queue, so a reply that arrives m
     if (label === "memory" && memoryRefusals++ === 0) return failure(429, limited);
     return streamResponse(sse(label));
   };
-  const memory = run("memory", fetchImpl, { priority: 1, maxWaitMs: 600000, sleep: () => sleepGate });
+  const memory = run("memory", fetchImpl, { priority: 1, retries: 40, sleep: () => sleepGate });
   await later(20);
   const reply = run("reply", fetchImpl);
   const replyResult = await reply;
@@ -328,7 +354,7 @@ test("a refused memory update waits outside the queue, so a reply that arrives m
 test("a memory update keeps trying through many refusals instead of giving up", async () => {
   let calls = 0;
   const fetchImpl = async () => (++calls <= 12 ? failure(429, limited) : streamResponse(sse("done")));
-  const { text } = await run("m", fetchImpl, { priority: 1, maxWaitMs: 600000, sleep: async () => {} });
+  const { text } = await run("m", fetchImpl, { priority: 1, retries: 40, sleep: async () => {} });
   assert.equal(text, "done");
   assert.equal(calls, 13);
 });

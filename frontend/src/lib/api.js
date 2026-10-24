@@ -182,8 +182,8 @@ async function request(method, path, body, headers = getHeaders()) {
 // the server prepares the exact messages, the browser streams the reply, and the server saves it. Everything else
 // is unchanged: when no entry of the model order is a browser source, the plain server-side calls below are used.
 const candidates = () => {
-  const { provider, model, token, fallbacks } = activeRequest();
-  return [{ provider, model, token }, ...fallbacks];
+  const { provider, model, token, retries, fallbacks } = activeRequest();
+  return [{ provider, model, token, retries }, ...fallbacks];
 };
 const usesBrowser = () => candidates().some(c => isBrowserSource(c.provider));
 const asRequest = items => ({ provider: items[0].provider, model: items[0].model, token: items[0].token, fallbacks: items.slice(1) });
@@ -235,7 +235,7 @@ const directTurn = (messages, items, onDelta) =>
     return { type: "done" };
   });
 
-// A memory update waits behind replies and is never dropped: it keeps retrying for up to ten minutes.
+// A memory update waits behind replies and is never dropped: it keeps asking again, for about ten minutes.
 async function updateMemoryViaBrowser(branchId) {
   const path = `/branches/${branchId}/memory`;
   let failure = new ModelError("No model available");
@@ -244,7 +244,7 @@ async function updateMemoryViaBrowser(branchId) {
       if (!segment.browser) return await request("POST", path, null, getHeaders(asRequest(segment.items)));
       const { messages } = await request("POST", path, null, stepHeaders(segment.items, "prepare"));
       return await tryInOrder(segment.items, async item => {
-        const reply = await streamCompletion(item, messages, () => {}, { priority: 1, maxWaitMs: 600000 });
+        const reply = await streamCompletion(item, messages, () => {}, { priority: 1, retries: 40 });
         return request("POST", path, { reply }, stepHeaders(segment.items, "commit")).catch(err => { throw new ModelError(err.message, { fatal: true }); });
       });
     } catch (err) {
