@@ -7,11 +7,28 @@ import { PROVIDERS } from "./providers";
 export const isBrowserSource = provider => !!PROVIDERS[provider]?.browserBase;
 
 export class ModelError extends Error {
-  constructor(message, { started = false, fatal = false } = {}) {
+  constructor(message, { started = false, fatal = false, rateLimited = false } = {}) {
     super(message);
     this.started = started;
     this.fatal = fatal;
+    this.rateLimited = rateLimited;
   }
+}
+
+// Tries a segment's models in order. The models of one source share its account limit, so once a source is rate
+// limited (after waiting for it) its other models are not asked; the next segment gets its turn instead.
+export async function tryInOrder(items, attempt) {
+  let failure = new ModelError("No model available");
+  for (const item of items) {
+    try {
+      return await attempt(item);
+    } catch (err) {
+      if (err.started) err.fatal = true;
+      if (err.fatal || err.rateLimited) throw err;
+      failure = err;
+    }
+  }
+  throw failure;
 }
 
 // [{provider, model, token}] in order -> [{ browser, items }] runs of entries that are called the same way.
@@ -78,11 +95,12 @@ function describeFailure(status, text) {
 }
 
 // A source that allows one request at a time answers a second one with 429 "retry after 1s". That is an instruction to
-// wait, so the call waits and tries again (for a memory update or a reply still running, or the app open on two devices).
-function retryAfterMs(res, text) {
+// wait, so the call waits and tries again (the app open on two devices, say). Each further refusal doubles the wait, so
+// a source that stays busy is not hammered; every refused attempt can count against its limit too.
+function retryAfterMs(res, text, refusals) {
   const header = Number(res.headers.get("retry-after"));
   const seconds = header > 0 ? header : Number(/retry after (\d+(?:\.\d+)?)\s*s/i.exec(text)?.[1]) || 1;
-  return Math.min(5000, Math.max(500, seconds * 1000)) + Math.random() * 400;
+  return Math.min(15000, Math.max(1000, seconds * 1000) * 2 ** Math.min(refusals, 4)) + Math.random() * 400;
 }
 
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -123,7 +141,7 @@ export function streamCompletion(candidate, messages, onDelta, options = {}) {
 // Reasoning models think for a long time, and some relays hold the whole response until the model has finished, so the
 // first response may take minutes (firstByteMs); once it is arriving, silence of idleMs means it has stalled.
 async function runCompletion({ provider, model, token }, messages, onDelta,
-  { fetchImpl = fetch, idleMs = 60000, firstByteMs = 240000, maxWaitMs = 180000, sleep = pause } = {}) {
+  { fetchImpl = fetch, idleMs = 60000, firstByteMs = 240000, maxWaitMs = 90000, sleep = pause } = {}) {
   const controller = new AbortController();
   let timer;
   const alive = (ms = idleMs) => {
@@ -139,7 +157,7 @@ async function runCompletion({ provider, model, token }, messages, onDelta,
   };
   try {
     let res;
-    for (let waited = 0; ; ) {
+    for (let waited = 0, refusals = 0; ; refusals++) {
       res = await fetchImpl(`${PROVIDERS[provider].browserBase}/chat/completions`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token.trim()}`, "Content-Type": "application/json" },
@@ -148,8 +166,8 @@ async function runCompletion({ provider, model, token }, messages, onDelta,
       });
       if (res.status !== 429) break;
       const failure = await res.text().catch(() => "");
-      const wait = retryAfterMs(res, failure);
-      if (waited + wait > maxWaitMs) throw new ModelError(describeFailure(429, failure));
+      const wait = retryAfterMs(res, failure, refusals);
+      if (waited + wait > maxWaitMs) throw new ModelError(describeFailure(429, failure), { rateLimited: true });
       await sleep(wait);
       waited += wait;
       alive(firstByteMs);
@@ -169,7 +187,7 @@ async function runCompletion({ provider, model, token }, messages, onDelta,
     }
   } catch (err) {
     const message = err.name === "AbortError" ? "No answer in time" : err instanceof ModelError ? err.message : `Couldn't reach ${PROVIDERS[provider].label} from the browser (${err.message})`;
-    throw new ModelError(message, { started: text.length > 0 });
+    throw new ModelError(message, { started: text.length > 0, rateLimited: err.rateLimited === true });
   } finally {
     clearTimeout(timer);
   }

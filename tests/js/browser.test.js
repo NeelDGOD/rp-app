@@ -2,7 +2,7 @@
 // Run: tests/js/run.sh
 import test from "node:test";
 import assert from "node:assert/strict";
-import { ModelError, isBrowserSource, readSse, runSegments, splitSegments, streamCompletion } from "../../frontend/src/lib/browserModels.js";
+import { ModelError, isBrowserSource, readSse, runSegments, splitSegments, streamCompletion, tryInOrder } from "../../frontend/src/lib/browserModels.js";
 
 const item = (provider, model) => ({ provider, model, token: "key" });
 const chunks = parts => new ReadableStream({
@@ -75,7 +75,7 @@ test("errors are readable: a JSON error keeps its message and status", async () 
 
 const limited = JSON.stringify({ error: { message: "rate limit exceeded, retry after 1s" } });
 
-test("a 429 means wait and try again: the call succeeds once a slot is free", async () => {
+test("a 429 means wait and try again, waiting longer each time: the call succeeds once a slot is free", async () => {
   let calls = 0;
   const waits = [];
   const fetchImpl = async () => (++calls <= 3 ? failure(429, limited) : streamResponse([...sse("Finally"), "data: [DONE]\n\n"]));
@@ -83,10 +83,12 @@ test("a 429 means wait and try again: the call succeeds once a slot is free", as
   assert.equal(text, "Finally");
   assert.equal(calls, 4);
   assert.equal(waits.length, 3);
-  assert.ok(waits.every(ms => ms >= 1000 && ms <= 1400), `waits follow "retry after 1s": ${waits}`);
+  assert.ok(waits[0] >= 1000 && waits[0] <= 1400, `first wait follows "retry after 1s": ${waits}`);
+  assert.ok(waits[1] >= 2000 && waits[1] <= 2400, `then doubles: ${waits}`);
+  assert.ok(waits[2] >= 4000 && waits[2] <= 4400, `and again: ${waits}`);
 });
 
-test("the Retry-After header is honoured, within sensible limits", async () => {
+test("the Retry-After header is honoured, and no single wait is longer than 15 seconds", async () => {
   const waits = [];
   let calls = 0;
   const fetchImpl = async () => {
@@ -96,14 +98,39 @@ test("the Retry-After header is honoured, within sensible limits", async () => {
   };
   await run("m", fetchImpl, { sleep: async ms => { waits.push(ms); } });
   assert.ok(waits[0] >= 3000 && waits[0] <= 3400);
-  assert.ok(waits[1] >= 5000 && waits[1] <= 5400, "a huge value is capped at 5 seconds");
+  assert.ok(waits[1] >= 15000 && waits[1] <= 15400, "a huge value is capped at 15 seconds");
 });
 
-test("a source that stays rate limited is given up on after the maximum wait, with its own message", async () => {
+test("a source that stays rate limited is given up on after the maximum wait, and marked as rate limited", async () => {
   let calls = 0;
   await assert.rejects(run("m", async () => { calls++; return failure(429, limited); }, { sleep: async () => {}, maxWaitMs: 5000 }),
-    e => e instanceof ModelError && /rate limit exceeded/.test(e.message) && /429/.test(e.message) && e.started === false);
-  assert.ok(calls >= 3 && calls <= 6, `kept trying for a while: ${calls} calls`);
+    e => e instanceof ModelError && e.rateLimited === true && /rate limit exceeded/.test(e.message) && /429/.test(e.message) && e.started === false);
+  assert.ok(calls >= 2 && calls <= 4, `kept trying for a while, but not forever: ${calls} calls`);
+});
+
+test("the models of a rate-limited source are not asked again, the next segment gets its turn", async () => {
+  const asked = [];
+  await assert.rejects(tryInOrder([item("budsai", "a"), item("budsai", "b")], async it => { asked.push(it.model); throw new ModelError("busy", { rateLimited: true }); }),
+    e => e.rateLimited === true);
+  assert.deepEqual(asked, ["a"], "the second model of the same source is skipped");
+});
+
+test("an ordinary failure moves on to the next model of the same source", async () => {
+  const asked = [];
+  const result = await tryInOrder([item("budsai", "a"), item("budsai", "b")], async it => {
+    asked.push(it.model);
+    if (it.model === "a") throw new ModelError("broken");
+    return "answered";
+  });
+  assert.equal(result, "answered");
+  assert.deepEqual(asked, ["a", "b"]);
+});
+
+test("a failure after text was shown, or a fatal one, stops at once", async () => {
+  const asked = [];
+  await assert.rejects(tryInOrder([item("budsai", "a"), item("budsai", "b")], async it => { asked.push(it.model); throw new ModelError("died", { started: true }); }),
+    e => e.fatal === true);
+  assert.deepEqual(asked, ["a"]);
 });
 
 test("errors are readable: a Cloudflare bot-check page becomes one line", async () => {

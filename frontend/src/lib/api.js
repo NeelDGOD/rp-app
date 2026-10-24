@@ -1,6 +1,6 @@
 import { ALL_PROVIDERS, PROVIDERS } from "./providers";
 import { activeRequest, CHAIN_KEY } from "./chain";
-import { ModelError, isBrowserSource, readSse, runSegments, splitSegments, streamCompletion } from "./browserModels";
+import { ModelError, isBrowserSource, readSse, runSegments, splitSegments, streamCompletion, tryInOrder } from "./browserModels";
 
 export { PROVIDERS };
 
@@ -222,38 +222,20 @@ async function commitReply(path, body, items) {
 
 async function browserTurn(path, body, items, onDelta) {
   const { messages } = await request("POST", path, body, stepHeaders(items, "prepare"));
-  let failure = new ModelError("No model available");
-  for (const item of items) {
-    let reply;
-    try {
-      reply = await streamCompletion(item, messages, onDelta);
-    } catch (err) {
-      failure = err;
-      if (err.started) err.fatal = true;
-      if (err.fatal) throw err;
-      continue;
-    }
+  return tryInOrder(items, async item => {
+    const reply = await streamCompletion(item, messages, onDelta);
     return commitReply(path, { ...body, reply, served_by: `${item.provider} / ${item.model}` }, items);
-  }
-  throw failure;
+  });
 }
 
 // Test chat: no prompt to prepare and nothing to save, so the browser just talks to the model.
-async function directTurn(messages, items, onDelta) {
-  let failure = new ModelError("No model available");
-  for (const item of items) {
-    try {
-      await streamCompletion(item, messages, onDelta);
-      return { type: "done" };
-    } catch (err) {
-      failure = err;
-      if (err.started) err.fatal = true;
-      if (err.fatal) throw err;
-    }
-  }
-  throw failure;
-}
+const directTurn = (messages, items, onDelta) =>
+  tryInOrder(items, async item => {
+    await streamCompletion(item, messages, onDelta);
+    return { type: "done" };
+  });
 
+// A memory update is not worth holding up the next message for, so it gives up on a busy source quickly.
 async function updateMemoryViaBrowser(branchId) {
   const path = `/branches/${branchId}/memory`;
   let failure = new ModelError("No model available");
@@ -261,13 +243,13 @@ async function updateMemoryViaBrowser(branchId) {
     try {
       if (!segment.browser) return await request("POST", path, null, getHeaders(asRequest(segment.items)));
       const { messages } = await request("POST", path, null, stepHeaders(segment.items, "prepare"));
-      for (const item of segment.items) {
-        let reply;
-        try { reply = await streamCompletion(item, messages, () => {}, { priority: 1 }); } catch (err) { failure = err; continue; }
-        return await request("POST", path, { reply }, stepHeaders(segment.items, "commit"));
-      }
+      return await tryInOrder(segment.items, async item => {
+        const reply = await streamCompletion(item, messages, () => {}, { priority: 1, maxWaitMs: 20000 });
+        return request("POST", path, { reply }, stepHeaders(segment.items, "commit")).catch(err => { throw new ModelError(err.message, { fatal: true }); });
+      });
     } catch (err) {
       failure = err;
+      if (err.fatal) throw err;
     }
   }
   throw failure;
