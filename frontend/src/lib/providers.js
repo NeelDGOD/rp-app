@@ -87,8 +87,14 @@ export const ALL_PROVIDERS = {
     modelHint: "Most names here are the same Claude model underneath. The ones that answer as themselves are Nemotron, GLM and MiMo. Avoid ids priced at $6 or more per 1M tokens",
     modelExample: "nemotron-3-ultra-550b-a55b",
     presets: [
-      { label: "Nemotron 3 Ultra (free, 5 a minute)", model: "nemotron-3-ultra-550b-a55b" },
-      { label: "Nemotron 3 Ultra", model: "nvidia/nemotron-3-ultra-550b-a55b" },
+      {
+        label: "Nemotron 3 Ultra (free id, then paid id)",
+        name: "Nemotron 3 Ultra",
+        group: [
+          { model: "nemotron-3-ultra-550b-a55b", retries: 0 },
+          { model: "nvidia/nemotron-3-ultra-550b-a55b", retries: 3 },
+        ],
+      },
       { label: "GLM 5.3 Flash", model: "glm-5-3-flash" },
       { label: "GLM 5.3", model: "glm-5-3" },
     ],
