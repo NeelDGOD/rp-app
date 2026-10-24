@@ -82,14 +82,15 @@ export const ALL_PROVIDERS = {
     browserBase: process.env.REACT_APP_BUDSAI_BASE || "https://apichat.budsin.dev/v1",
     // It answers a second request made while one is running with 429, and each reply takes 30 to 60 seconds.
     browserConcurrency: 1,
-    tokenKey: "budsai_token", modelKey: "budsai_model", defaultModel: "glm-5-3-flash",
+    tokenKey: "budsai_token", modelKey: "budsai_model", defaultModel: "nemotron-3-ultra-550b-a55b",
     tokenLabel: "BudsAI API Key", tokenPlaceholder: "sk-…",
-    modelHint: "Model id from apichat.budsin.dev/pricing. Avoid ids priced at $6 or more per 1M tokens", modelExample: "glm-5-3-flash",
+    modelHint: "Most names here are the same Claude model underneath. The ones that answer as themselves are Nemotron, GLM and MiMo. Avoid ids priced at $6 or more per 1M tokens",
+    modelExample: "nemotron-3-ultra-550b-a55b",
     presets: [
+      { label: "Nemotron 3 Ultra (free, 5 a minute)", model: "nemotron-3-ultra-550b-a55b" },
+      { label: "Nemotron 3 Ultra", model: "nvidia/nemotron-3-ultra-550b-a55b" },
       { label: "GLM 5.3 Flash", model: "glm-5-3-flash" },
       { label: "GLM 5.3", model: "glm-5-3" },
-      { label: "DeepSeek Chat", model: "deepseek-chat" },
-      { label: "DeepSeek V3.2", model: "deepseek-v3.2" },
     ],
   },
   forest: {

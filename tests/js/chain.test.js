@@ -188,10 +188,11 @@ test("a tile of a switched-off source is converted too, and still comes back wit
   assert.equal(JSON.parse(s.data[CHAIN_KEY])[0].provider, "groq", "its saved entry is kept");
 });
 
-test("the BudsAI presets are plain one-model entries", () => {
+test("the BudsAI presets are plain one-model entries for the models that answer as themselves", () => {
   const presets = PROVIDERS.budsai.presets;
-  assert.deepEqual(presets.slice(0, 2).map(p => p.model), ["glm-5-3-flash", "glm-5-3"]);
+  assert.deepEqual(presets.map(p => p.model), ["nemotron-3-ultra-550b-a55b", "nvidia/nemotron-3-ultra-550b-a55b", "glm-5-3-flash", "glm-5-3"]);
   assert.ok(presets.every(p => typeof p.model === "string" && !p.group));
+  assert.ok(!presets.some(p => /deepseek/i.test(p.model)), "the DeepSeek names are Claude underneath, so they are not offered");
 });
 
 // ---- sources switched off for now keep their saved entries ------------------------------------------------
