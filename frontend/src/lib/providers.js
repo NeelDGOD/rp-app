@@ -86,14 +86,8 @@ export const ALL_PROVIDERS = {
     tokenLabel: "BudsAI API Key", tokenPlaceholder: "sk-…",
     modelHint: "Model id from apichat.budsin.dev/pricing. Avoid ids priced at $6 or more per 1M tokens", modelExample: "glm-5-3-flash",
     presets: [
-      {
-        label: "GLM 5.3 (verified, best first)",
-        name: "GLM 5.3",
-        group: [
-          { model: "glm-5-3-flash" },
-          { model: "glm-5-3" },
-        ],
-      },
+      { label: "GLM 5.3 Flash", model: "glm-5-3-flash" },
+      { label: "GLM 5.3", model: "glm-5-3" },
       { label: "DeepSeek Chat", model: "deepseek-chat" },
       { label: "DeepSeek V3.2", model: "deepseek-v3.2" },
     ],

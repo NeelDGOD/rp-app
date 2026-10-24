@@ -1,7 +1,7 @@
 // Tests for frontend/src/lib/chain.js (the model order list). Run: tests/js/run.sh
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readChain, writeChain, chainToRequest, activeRequest, addEntry, updateEntry, removeEntry, moveEntry, addGroup, addVariant, updateVariant, removeVariant, moveVariant, entryModels, MAX_CHAIN, CHAIN_KEY } from "../../frontend/src/lib/chain.js";
+import { readChain, writeChain, chainToRequest, activeRequest, addEntry, updateEntry, removeEntry, moveEntry, MAX_CHAIN, CHAIN_KEY } from "../../frontend/src/lib/chain.js";
 import { PROVIDERS } from "../../frontend/src/lib/providers.js";
 
 const store = (obj = {}) => ({ getItem: k => (k in obj ? obj[k] : null), setItem: (k, v) => { obj[k] = String(v); }, data: obj });
@@ -151,82 +151,47 @@ test("activeRequest keeps working for someone who never used the list (old setti
   assert.deepEqual([req.provider, req.model, req.token, req.fallbacks.length], ["forest", "llama-3.3-70b-versatile", "GK", 0]);
 });
 
-// ---- group tiles: one entry holding an ordered list of model ids -----------------------------------------
-const GLM = PROVIDERS.budsai.presets.find(p => p.group).group;
-const glmTile = () => addGroup([], { provider: "budsai", name: "GLM 5.3", models: GLM })[0];
-const ids2 = req => [req.model, ...req.fallbacks.map(f => f.model)];
+// ---- a saved list from the version with inner-list tiles is turned into ordinary entries -----------------------
+const OLD_TILE = {
+  id: "t1", provider: "budsai", model: "", name: "GLM 5.3",
+  variants: [{ id: "v1", model: "glm-5-3-flash", enabled: true }, { id: "v2", model: "glm-5-3", enabled: true }, { id: "v3", model: "zai/glm-5.3", enabled: false }],
+};
 
-test("the BudsAI GLM preset holds only the ids verified to be GLM, best first, all switched on", () => {
-  const tile = glmTile();
-  assert.deepEqual(tile.variants.map(v => v.model), ["glm-5-3-flash", "glm-5-3"]);
-  assert.deepEqual(entryModels(tile), ["glm-5-3-flash", "glm-5-3"]);
-  assert.equal(new Set(tile.variants.map(v => v.id)).size, 2, "variant ids are unique");
+test("an old inner-list tile becomes separate entries in the same order; switched-off ids are dropped", () => {
+  const s = store({ [CHAIN_KEY]: JSON.stringify([{ id: "a", provider: "puter", model: "p1", name: "" }, OLD_TILE, { id: "z", provider: "forest", model: "f1", name: "" }]) });
+  const chain = readChain(s);
+  assert.deepEqual(ids(chain), ["puter:p1", "budsai:glm-5-3-flash", "budsai:glm-5-3", "forest:f1"]);
+  assert.equal(new Set(chain.map(e => e.id)).size, chain.length, "ids are unique");
+  assert.ok(chain.every(e => typeof e.model === "string" && !("variants" in e)));
 });
 
-test("a group is tried in its own order, between the entries around it", () => {
-  const chain = [
-    { id: "a", provider: "puter", model: "p1", name: "" },
-    { ...glmTile(), variants: glmTile().variants.map(v => ({ ...v, enabled: true })) },
-    { id: "z", provider: "forest", model: "g1", name: "" },
-  ];
-  const req = chainToRequest(chain, keys("puter", "budsai", "forest"), true);
-  assert.deepEqual(ids2(req), ["p1", ...GLM.map(v => v.model), "g1"]);
-  assert.ok(req.fallbacks.filter(f => f.provider === "budsai").every(f => f.token === "key-budsai"));
+test("the converted list is what gets sent, with the keys of each source", () => {
+  const s = store({ [CHAIN_KEY]: JSON.stringify([OLD_TILE, { id: "z", provider: "forest", model: "f1", name: "" }]), budsai_token: "B", forest_token: "F", use_fallbacks: "true" });
+  const req = activeRequest(s);
+  assert.deepEqual([req.provider, req.model, req.token], ["budsai", "glm-5-3-flash", "B"]);
+  assert.deepEqual(req.fallbacks.map(f => `${f.provider}:${f.model}:${f.token}`), ["budsai:glm-5-3:B", "forest:f1:F"]);
 });
 
-test("switched-off ids are skipped; a group with everything off is skipped entirely", () => {
-  const tile = addGroup([], { provider: "budsai", name: "t", models: [{ model: "a" }, { model: "b", enabled: false }, { model: "c" }] })[0];
-  const req = chainToRequest([tile, { id: "z", provider: "forest", model: "g1", name: "" }], keys("budsai", "forest"), true);
-  assert.deepEqual(ids2(req), ["a", "c", "g1"]);
-  const allOff = { ...tile, variants: tile.variants.map(v => ({ ...v, enabled: false })) };
-  const next = chainToRequest([allOff, { id: "z", provider: "forest", model: "g1", name: "" }], keys("budsai", "forest"), true);
-  assert.deepEqual([next.provider, next.model, next.fallbacks.length], ["forest", "g1", 0]);
+test("the first change after the conversion saves ordinary entries only", () => {
+  const s = store({ [CHAIN_KEY]: JSON.stringify([OLD_TILE]) });
+  writeChain(addEntry(readChain(s), { provider: "forest", model: "f1" }), s);
+  const saved = JSON.parse(s.data[CHAIN_KEY]);
+  assert.deepEqual(saved.map(e => `${e.provider}:${e.model}`), ["budsai:glm-5-3-flash", "budsai:glm-5-3", "forest:f1"]);
+  assert.ok(saved.every(e => !("variants" in e)));
 });
 
-test("a group whose source has no key is skipped, and fallback off uses only its first enabled id", () => {
-  const tile = glmTile();
-  const noKey = chainToRequest([tile, { id: "z", provider: "forest", model: "g1", name: "" }], keys("forest"), true);
-  assert.deepEqual(ids2(noKey), ["g1"]);
-  const off = chainToRequest([tile], keys("budsai"), false);
-  assert.deepEqual([off.model, off.fallbacks.length], ["glm-5-3-flash", 0]);
+test("a tile of a switched-off source is converted too, and still comes back with its source", () => {
+  const tile = { ...OLD_TILE, id: "h", provider: "groq" };
+  const s = store({ [CHAIN_KEY]: JSON.stringify([tile]) });
+  assert.deepEqual(readChain(s), [], "groq is switched off, so nothing is shown");
+  writeChain([], s);
+  assert.equal(JSON.parse(s.data[CHAIN_KEY])[0].provider, "groq", "its saved entry is kept");
 });
 
-test("a saved group survives a reload; broken variants are dropped", () => {
-  const s = store({});
-  writeChain([glmTile()], s);
-  const back = readChain(s)[0];
-  assert.deepEqual(back.variants.map(v => [v.model, v.enabled]), GLM.map(v => [v.model, v.enabled !== false]));
-  s.data[CHAIN_KEY] = JSON.stringify([{ id: "g", provider: "budsai", model: "", variants: [{ model: "ok" }, { model: "  " }, null, { id: "x", model: "off", enabled: false }] }]);
-  assert.deepEqual(readChain(s)[0].variants.map(v => [v.model, v.enabled]), [["ok", true], ["off", false]]);
-});
-
-test("editing a group: add, switch off, change, remove and reorder its ids", () => {
-  let chain = [glmTile()];
-  const id = chain[0].id;
-  const models = () => chain[0].variants.map(v => v.model).join("|");
-  chain = addVariant(chain, id, "  extra  ");
-  assert.equal(chain[0].variants.length, 3);
-  assert.equal(chain[0].variants[2].model, "extra");
-  chain = moveVariant(chain, id, 2, 0);
-  assert.equal(chain[0].variants[0].model, "extra");
-  assert.deepEqual(chainToRequest(chain, keys("budsai"), true).model, "extra", "moving an id to the top makes it the first one tried");
-  const first = chain[0].variants[0].id;
-  chain = updateVariant(chain, id, first, { enabled: false });
-  assert.equal(chainToRequest(chain, keys("budsai"), true).model, "glm-5-3-flash");
-  chain = updateVariant(chain, id, first, { model: "renamed" });
-  assert.equal(chain[0].variants[0].model, "renamed");
-  chain = removeVariant(chain, id, first);
-  assert.equal(chain[0].variants.length, 2);
-  assert.ok(!models().includes("renamed"));
-  const other = addEntry([], { provider: "puter", model: "m" });
-  assert.deepEqual(addVariant(other, other[0].id, "x"), other, "single entries ignore variant edits");
-});
-
-test("groups count toward the request cap by the ids they contribute", () => {
-  const big = addGroup([], { provider: "budsai", name: "many", models: Array.from({ length: 30 }, (_, i) => ({ model: `m${i}` })) });
-  const req = chainToRequest(big, keys("budsai"), true);
-  assert.equal(1 + req.fallbacks.length, MAX_CHAIN);
-  assert.equal(req.model, "m0");
+test("the BudsAI presets are plain one-model entries", () => {
+  const presets = PROVIDERS.budsai.presets;
+  assert.deepEqual(presets.slice(0, 2).map(p => p.model), ["glm-5-3-flash", "glm-5-3"]);
+  assert.ok(presets.every(p => typeof p.model === "string" && !p.group));
 });
 
 // ---- sources switched off for now keep their saved entries ------------------------------------------------
