@@ -122,3 +122,29 @@ def test_the_debug_key_is_stored_hashed():
     stored = [r[0] for r in conn.execute("SELECT key_hash FROM debug_keys").fetchall()]
     conn.close()
     assert stored and key not in stored
+
+
+def test_an_upload_makes_a_handful_of_database_statements_not_one_per_event():
+    """The database is a network hop away on the live server, so a statement per event made uploads take seconds."""
+    api = setup()
+    statements = {"n": 0}
+    real = api.mod.get_db
+
+    def counting():
+        conn = real()
+
+        class Spy:
+            def __getattr__(self, name):
+                attr = getattr(conn, name)
+                if name != "execute":
+                    return attr
+
+                def run(*args, **kwargs):
+                    statements["n"] += 1
+                    return attr(*args, **kwargs)
+                return run
+        return Spy()
+    api.mod.get_db = counting
+    assert post(api, [event("x", f"e{i}") for i in range(100)]).json() == {"stored": 100}
+    assert statements["n"] <= 6, f"{statements['n']} statements for one upload"
+    assert len(api.c.get("/client-log?limit=1000", headers=api.h()).json()["events"]) == 100

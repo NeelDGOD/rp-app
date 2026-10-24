@@ -389,18 +389,25 @@ def event_time(t: str) -> str:
 @app.post("/client-log")
 def post_client_log(batch: ClientLogBatch, user_id: str = Depends(require_user)):
     events = batch.events[:CLIENT_LOG_BATCH]
+    rows_ = []
+    for e in events:
+        data = json.dumps(scrub(e.data))
+        rows_.append((str(uuid.uuid4()), user_id, event_time(e.t), batch.device[:80], e.kind[:40], e.message[:300],
+                      data if len(data) <= 2000 else json.dumps({"truncated": True})))
+    cutoff = (datetime.utcnow() - timedelta(days=LOG_RETENTION_DAYS)).isoformat()
+
+    # The database is a network hop away, so every statement costs a round trip: the whole batch is one INSERT and the
+    # clean-up one DELETE, instead of a statement per event.
     def _store():
         conn = get_db()
-        for e in events:
-            data = json.dumps(scrub(e.data))
-            q(conn, "INSERT INTO client_events VALUES (?,?,?,?,?,?,?)",
-              (str(uuid.uuid4()), user_id, event_time(e.t), batch.device[:80], e.kind[:40], e.message[:300],
-               data if len(data) <= 2000 else json.dumps({"truncated": True})))
-        cutoff = (datetime.utcnow() - timedelta(days=LOG_RETENTION_DAYS)).isoformat()
-        q(conn, "DELETE FROM client_events WHERE user_id=? AND created_at < ?", (user_id, cutoff))
-        q(conn, "DELETE FROM client_events WHERE user_id=? AND id NOT IN "
-                "(SELECT id FROM client_events WHERE user_id=? ORDER BY created_at DESC LIMIT ?)", (user_id, user_id, CLIENT_LOG_MAX_ROWS))
+        for start in range(0, len(rows_), 50):
+            chunk = rows_[start:start + 50]
+            q(conn, "INSERT INTO client_events VALUES " + ",".join(["(?,?,?,?,?,?,?)"] * len(chunk)), tuple(v for row in chunk for v in row))
+        q(conn, "DELETE FROM client_events WHERE user_id=? AND (created_at < ? OR id NOT IN "
+                "(SELECT id FROM client_events WHERE user_id=? ORDER BY created_at DESC LIMIT ?))", (user_id, cutoff, user_id, CLIENT_LOG_MAX_ROWS))
         conn.commit(); conn.close()
+    if not rows_:
+        return {"stored": 0}
     with_db_retry(_store)
     return {"stored": len(events)}
 
