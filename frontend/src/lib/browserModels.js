@@ -4,6 +4,7 @@
 // segment, and segments are tried one after the other until one answers before any text has been shown.
 import { PROVIDERS } from "./providers";
 import { DEFAULT_RETRIES } from "./chain";
+import { logEvent } from "./debugLog";
 
 export const isBrowserSource = provider => !!PROVIDERS[provider]?.browserBase;
 
@@ -139,11 +140,30 @@ function inQueue(provider, priority, task) {
 export async function streamCompletion(candidate, messages, onDelta, options = {}) {
   const { priority = 0, sleep = pause } = options;
   const retries = options.retries ?? candidate.retries ?? DEFAULT_RETRIES;
+  const label = `${candidate.provider}/${candidate.model}`;
+  const begun = Date.now();
+  const withoutKey = text => (candidate.token && candidate.token.length > 8 ? String(text).split(candidate.token.trim()).join("[key]") : String(text));
   for (let refusals = 0; ; refusals++) {
-    const outcome = await inQueue(candidate.provider, priority, () => attempt(candidate, messages, onDelta, options));
-    if (!outcome.refused) return outcome.text;
-    if (refusals >= retries) throw new ModelError(describeFailure(429, outcome.refused.body));
-    await sleep(backoffMs(outcome.refused.seconds, refusals));
+    const asked = Date.now();
+    let queuedMs = 0;
+    let outcome;
+    try {
+      outcome = await inQueue(candidate.provider, priority, () => { queuedMs = Date.now() - asked; return attempt(candidate, messages, onDelta, options); });
+    } catch (err) {
+      logEvent("model-error", `${label} failed: ${withoutKey(err.message)}`, { provider: candidate.provider, model: candidate.model, ms: Date.now() - begun, retriesUsed: refusals, queuedMs, shown: err.started, priority });
+      throw err;
+    }
+    if (!outcome.refused) {
+      logEvent("model-call", `${label} answered`, { provider: candidate.provider, model: candidate.model, status: 200, ms: Date.now() - begun, chars: outcome.text.length, retriesUsed: refusals, queuedMs, priority });
+      return outcome.text;
+    }
+    if (refusals >= retries) {
+      logEvent("model-error", `${label} busy (429), no retries left (${retries} used)`, { provider: candidate.provider, model: candidate.model, status: 429, ms: Date.now() - begun, queuedMs, priority });
+      throw new ModelError(describeFailure(429, withoutKey(outcome.refused.body)));
+    }
+    const wait = backoffMs(outcome.refused.seconds, refusals);
+    logEvent("model-call", `${label} busy (429), retry ${refusals + 1} of ${retries} in ${(wait / 1000).toFixed(1)}s`, { provider: candidate.provider, model: candidate.model, status: 429, waitMs: Math.round(wait), queuedMs, priority });
+    await sleep(wait);
   }
 }
 

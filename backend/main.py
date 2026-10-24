@@ -1,7 +1,7 @@
 import os, re, json, uuid, secrets, asyncio, threading, time, base64, hashlib
 from datetime import datetime, timedelta
 from types import SimpleNamespace
-from typing import Optional
+from typing import List, Optional
 from fastapi import FastAPI, HTTPException, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -50,6 +50,8 @@ ADMIN_EMAIL   = "admin@chat.com"
 ADMIN_PASSWORD = "admin"
 KEYS_SECRET   = os.environ.get("KEYS_SECRET", "")
 LOG_RETENTION_DAYS = 14
+CLIENT_LOG_MAX_ROWS = 3000
+CLIENT_LOG_BATCH = 200
 SYNCED_SETTINGS = (
     # "hf_token", "hf_model",
     "openrouter_token", "nvidia_token", "gemini_token", "mistral_token", "groq_token", "navy_token", "puter_token", "freetheai_token", "budsai_token", "forest_token", "routmy_token",
@@ -108,6 +110,8 @@ TABLE_COLS = {
     "user_settings": ["user_id", "data"],
     "api_errors": ["id", "user_id", "created_at", "kind", "provider", "model", "message", "fell_back"],
     "chat_active_branch": ["chat_id", "branch_id"],
+    "client_events": ["id", "user_id", "created_at", "device", "kind", "message", "data"],
+    "debug_keys": ["key_hash", "user_id", "created_at"],
 }
 
 def rows(conn, sql, params=(), cols=None):
@@ -187,6 +191,14 @@ SCHEMA = """
         CREATE INDEX IF NOT EXISTS idx_api_errors_user ON api_errors(user_id, created_at);
         CREATE TABLE IF NOT EXISTS chat_active_branch (
             chat_id TEXT PRIMARY KEY, branch_id TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS client_events (
+            id TEXT PRIMARY KEY, user_id TEXT NOT NULL, created_at TEXT NOT NULL, device TEXT NOT NULL,
+            kind TEXT NOT NULL, message TEXT NOT NULL, data TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_client_events_user ON client_events(user_id, created_at);
+        CREATE TABLE IF NOT EXISTS debug_keys (
+            key_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL
         );
     """
 
@@ -343,6 +355,124 @@ def put_settings(data: SettingsPayload, user_id: str = Depends(require_user)):
 @app.get("/health")
 def health():
     return {"ok": True}
+
+# ── CLIENT LOG ────────────────────────────────────────────────────────────────
+# What the app itself saw: settings changes, every model call from the browser, retries, memory updates, app errors.
+# Never chat text, replies or keys: the app does not send them, and anything that looks like one is dropped here too.
+SECRET_FIELD = re.compile(r"token|key|secret|password|authorization|content|message|prompt|text", re.IGNORECASE)
+
+def scrub(value, depth=0):
+    if isinstance(value, dict):
+        return {k: scrub(v, depth + 1) for k, v in value.items() if not SECRET_FIELD.search(str(k))} if depth < 4 else {}
+    if isinstance(value, list):
+        return [scrub(v, depth + 1) for v in value[:30]] if depth < 4 else []
+    if isinstance(value, str):
+        return value[:300]
+    return value
+
+class ClientEvent(BaseModel):
+    t: str = ""
+    kind: str
+    message: str = ""
+    data: dict = {}
+
+class ClientLogBatch(BaseModel):
+    device: str = ""
+    events: List[ClientEvent]
+
+def event_time(t: str) -> str:
+    try:
+        return datetime.fromisoformat(t.replace("Z", "+00:00")).replace(tzinfo=None).isoformat()
+    except Exception:
+        return ts()
+
+@app.post("/client-log")
+def post_client_log(batch: ClientLogBatch, user_id: str = Depends(require_user)):
+    events = batch.events[:CLIENT_LOG_BATCH]
+    def _store():
+        conn = get_db()
+        for e in events:
+            data = json.dumps(scrub(e.data))
+            q(conn, "INSERT INTO client_events VALUES (?,?,?,?,?,?,?)",
+              (str(uuid.uuid4()), user_id, event_time(e.t), batch.device[:80], e.kind[:40], e.message[:300],
+               data if len(data) <= 2000 else json.dumps({"truncated": True})))
+        cutoff = (datetime.utcnow() - timedelta(days=LOG_RETENTION_DAYS)).isoformat()
+        q(conn, "DELETE FROM client_events WHERE user_id=? AND created_at < ?", (user_id, cutoff))
+        q(conn, "DELETE FROM client_events WHERE user_id=? AND id NOT IN "
+                "(SELECT id FROM client_events WHERE user_id=? ORDER BY created_at DESC LIMIT ?)", (user_id, user_id, CLIENT_LOG_MAX_ROWS))
+        conn.commit(); conn.close()
+    with_db_retry(_store)
+    return {"stored": len(events)}
+
+def read_client_events(user_id: str, limit: int) -> list:
+    conn = get_db()
+    r = rows(conn, "SELECT created_at, device, kind, message, data FROM client_events WHERE user_id=? ORDER BY created_at DESC LIMIT ?",
+             (user_id, max(1, min(limit, 1000))), cols=["created_at", "device", "kind", "message", "data"])
+    conn.close()
+    for e in r:
+        e["data"] = json.loads(e["data"])
+    return r
+
+@app.get("/client-log")
+def get_client_log(limit: int = 300, user_id: str = Depends(require_user)):
+    return {"events": read_client_events(user_id, limit)}
+
+@app.delete("/client-log")
+def clear_client_log(user_id: str = Depends(require_user)):
+    db_write("DELETE FROM client_events WHERE user_id=?", (user_id,))
+    return {"ok": True}
+
+# A debug key lets someone you give it to read this log and a summary of your settings (no keys, no chat text), nothing else.
+def key_hash(key: str) -> str:
+    return hashlib.sha256(key.encode()).hexdigest()
+
+@app.post("/debug-key")
+def create_debug_key(user_id: str = Depends(require_user)):
+    key = secrets.token_urlsafe(32)
+    db_write("INSERT OR REPLACE INTO debug_keys VALUES (?,?,?)", (key_hash(key), user_id, ts()))
+    return {"key": key}
+
+@app.get("/debug-key")
+def debug_key_status(user_id: str = Depends(require_user)):
+    conn = get_db()
+    r = row(conn, "SELECT created_at FROM debug_keys WHERE user_id=?", (user_id,), cols=["created_at"])
+    conn.close()
+    return {"active": bool(r), "created_at": r["created_at"] if r else None}
+
+@app.delete("/debug-key")
+def revoke_debug_key(user_id: str = Depends(require_user)):
+    db_write("DELETE FROM debug_keys WHERE user_id=?", (user_id,))
+    return {"ok": True}
+
+SETTINGS_SHOWN = ("model_chain", "use_fallbacks", "llm_provider")
+
+def settings_summary(user_id: str) -> dict:
+    conn = get_db()
+    r = row(conn, "SELECT * FROM user_settings WHERE user_id=?", (user_id,), cols=TABLE_COLS["user_settings"])
+    conn.close()
+    if not r:
+        return {"keys_set": [], "settings": {}}
+    saved = json.loads(settings_cipher().decrypt(r["data"].encode()))
+    shown = {k: v for k, v in saved.items() if k in SETTINGS_SHOWN or k.endswith("_model")}
+    if "model_chain" in shown:
+        try:
+            shown["model_chain"] = json.loads(shown["model_chain"])
+        except Exception:
+            pass
+    return {"keys_set": sorted(k.replace("_token", "") for k, v in saved.items() if k.endswith("_token") and v), "settings": shown}
+
+@app.get("/debug/{key}")
+def read_debug(key: str, limit: int = 400):
+    conn = get_db()
+    r = row(conn, "SELECT user_id FROM debug_keys WHERE key_hash=?", (key_hash(key),), cols=["user_id"])
+    if not r:
+        conn.close()
+        raise HTTPException(404, "Unknown or revoked debug key")
+    user_id = r["user_id"]
+    server_errors = rows(conn, "SELECT created_at, kind, provider, model, message, fell_back FROM api_errors WHERE user_id=? ORDER BY created_at DESC LIMIT 100",
+                         (user_id,), cols=["created_at", "kind", "provider", "model", "message", "fell_back"])
+    conn.close()
+    return {"generated_at": ts(), **settings_summary(user_id), "events": read_client_events(user_id, limit), "server_errors": server_errors}
 
 # ── ERROR LOG ─────────────────────────────────────────────────────────────────
 @app.get("/logs")

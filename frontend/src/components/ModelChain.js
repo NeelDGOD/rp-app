@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from "react";
 import { Check, GripVertical, Pencil, Plus, X } from "lucide-react";
 import { PROVIDERS, pushSettingsSoon, onSettingsPulled } from "../lib/api";
-import { addEntry, moveEntry, normalizeRetries, readChain, removeEntry, updateEntry, writeChain } from "../lib/chain";
+import { addEntry, describeChain, moveEntry, normalizeRetries, readChain, removeEntry, updateEntry, writeChain } from "../lib/chain";
+import { logEvent } from "../lib/debugLog";
 import { isBrowserSource } from "../lib/browserModels";
 import SortableList from "./SortableList";
 import ToggleSetting from "./ToggleSetting";
@@ -33,6 +34,7 @@ export default function ModelChain() {
   function commit(next) {
     setChain(next);
     writeChain(next);
+    logEvent("settings", "model list changed", { order: describeChain(next), entries: next.length });
     pushSettingsSoon();
   }
 
@@ -55,7 +57,7 @@ export default function ModelChain() {
         label="Fall back to the next model"
         sub="Off: only the first model with a key is used"
         checked={useFallbacks}
-        onChange={v => { setUseFallbacks(v); localStorage.setItem("use_fallbacks", String(v)); pushSettingsSoon(); }}
+        onChange={v => { setUseFallbacks(v); localStorage.setItem("use_fallbacks", String(v)); logEvent("settings", "fall back to the next model", { on: v }); pushSettingsSoon(); }}
       />
 
       {chain.length === 0 ? (

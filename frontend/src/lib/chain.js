@@ -106,3 +106,6 @@ export function moveEntry(chain, from, to) {
   next.splice(target, 0, item);
   return next;
 }
+
+// One line for the log: "budsai:glm-5-3-flash (3 retries) > forest:china/DeepSeek-V4-Flash".
+export const describeChain = chain => chain.map(e => `${e.provider}:${e.model || "?"}${e.retries !== undefined && e.retries !== DEFAULT_RETRIES ? ` (${e.retries} retries)` : ""}`).join(" > ");

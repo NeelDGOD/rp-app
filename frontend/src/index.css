@@ -747,3 +747,12 @@ select.input { appearance: none; background-image: linear-gradient(45deg, transp
 .key-acc__inner { min-height: 0; overflow: hidden; }
 .key-acc__body { display: flex; flex-direction: column; gap: 8px; padding: 2px 14px 14px; }
 @media (prefers-reduced-motion: reduce) { .key-acc__panel, .key-acc.is-open .key-acc__panel, .key-acc__chev { transition: none; } }
+
+/* ── DEBUG LOG ── */
+.debug-lines { display: flex; flex-direction: column; max-height: 260px; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); }
+.debug-line { display: flex; gap: 8px; padding: 6px 10px; font-family: var(--mono); font-size: 11.5px; line-height: 1.5; border-bottom: 1px solid var(--border); color: var(--text2); }
+.debug-line:last-child { border-bottom: 0; }
+.debug-line.is-error { color: var(--error); }
+.debug-line__time { color: var(--text3); flex-shrink: 0; }
+.debug-line__kind { color: var(--accent); flex-shrink: 0; }
+.debug-line__msg { min-width: 0; overflow-wrap: anywhere; }

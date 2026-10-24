@@ -3,6 +3,7 @@ import { ChevronDown, Eye, EyeOff } from "lucide-react";
 import { PROVIDERS, pushSettingsSoon, onSyncFailed, onSettingsPulled } from "../lib/api";
 import { useSyncPending } from "../lib/ui";
 import { Spinner } from "./States";
+import { logEvent } from "../lib/debugLog";
 
 const readKeys = () => Object.fromEntries(Object.entries(PROVIDERS).map(([id, p]) => [id, localStorage.getItem(p.tokenKey) || ""]));
 
@@ -18,6 +19,7 @@ export default function ProviderKeys({ onChange }) {
   useEffect(() => onSettingsPulled(() => setKeys(readKeys())), []);
 
   function setKey(id, value) {
+    if (!!keys[id] !== !!value.trim()) logEvent("settings", value.trim() ? "API key added" : "API key removed", { source: PROVIDERS[id].label });
     setKeys(k => ({ ...k, [id]: value }));
     localStorage.setItem(PROVIDERS[id].tokenKey, value);
     pushSettingsSoon();

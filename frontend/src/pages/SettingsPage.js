@@ -8,6 +8,8 @@ import { BusyIcon, PageHeader } from "../components/States";
 import { Composer, Thinking, Turn } from "../components/Transcript";
 import { Prose } from "../lib/format";
 import { useBusy } from "../lib/ui";
+import { logEvent } from "../lib/debugLog";
+import DebugLogPanel from "../components/DebugLogPanel";
 
 const PREVIEW_TEXT = `*She looks away, biting her lip as if weighing whether to say it.* "You came back," she says at last. "I wasn't sure you would."`;
 
@@ -67,7 +69,7 @@ export default function SettingsPage() {
     setErrorLog([]);
   }
 
-  function save(key, val) { localStorage.setItem(key, String(val)); pushSettingsSoon(); }
+  function save(key, val) { localStorage.setItem(key, String(val)); logEvent("settings", `${key} changed`, { name: key, value: String(val) }); pushSettingsSoon(); }
 
   async function sendTestMessage() {
     if (!testInput.trim() || testStreaming) return;
@@ -147,7 +149,7 @@ export default function SettingsPage() {
           </div>
         </Section>
 
-        <Section {...section("tools")} title="Tools" sub="Test the model, read recent errors" Icon={Wrench}>
+        <Section {...section("tools")} title="Tools" sub="Test the model, errors, debug log" Icon={Wrench}>
           <div className="field">
             <div className="subhead">
               <div>
@@ -228,6 +230,10 @@ export default function SettingsPage() {
               </div>
             )}
           </div>
+
+          <div className="divider" />
+
+          <DebugLogPanel />
         </Section>
 
         <Section {...section("account")} title="Account" sub={localStorage.getItem("auth_email") || "Signed in"} Icon={UserRound}>

@@ -1,5 +1,6 @@
 import { ALL_PROVIDERS, PROVIDERS } from "./providers";
-import { activeRequest, CHAIN_KEY } from "./chain";
+import { activeRequest, CHAIN_KEY, describeChain, readChain } from "./chain";
+import { connectLog, logEvent } from "./debugLog";
 import { ModelError, isBrowserSource, readSse, runSegments, splitSegments, streamCompletion, tryInOrder } from "./browserModels";
 
 export { PROVIDERS };
@@ -61,6 +62,11 @@ export async function pullSettings() {
     return;
   }
   SYNCED_NAMES.forEach(k => (settings[k] ? localStorage.setItem(k, settings[k]) : localStorage.removeItem(k)));
+  logEvent("sync", "settings pulled from the account", {
+    sourcesWithKey: Object.values(ALL_PROVIDERS).filter(p => settings[p.tokenKey]).map(p => p.label),
+    order: describeChain(readChain()),
+    fallback: settings.use_fallbacks === "true",
+  });
   pulledListeners.forEach(fn => fn());
 }
 
@@ -83,7 +89,9 @@ async function pushSettings(attempt = 0) {
     await api.saveSettings(localSettings());
     pushPending = false;
     syncListeners.forEach(fn => fn(false));
-  } catch {
+    logEvent("sync", "settings saved to the account", { attempt });
+  } catch (err) {
+    logEvent("sync-error", `saving settings failed: ${err.message}`, { attempt });
     syncListeners.forEach(fn => fn(true));
     if (attempt < SYNC_RETRY_DELAYS_MS.length) {
       pushTimer = setTimeout(() => pushSettings(attempt + 1), SYNC_RETRY_DELAYS_MS[attempt]);
@@ -264,10 +272,40 @@ const legacyStream = (path, failure, body, onDelta, onDone, onError) => fetchWit
   return readStream(res.body, onDelta, onDone, onError);
 }).catch(onError);
 
-const turnStream = (path, failure, body, onDelta, onDone, onError) => (usesBrowser()
-  ? runSegments(splitSegments(candidates()), (items, delta) => browserTurn(path, body, items, delta),
-    (items, delta) => serverTurn(path, body, items, delta), onDelta, onDone, onError)
-  : legacyStream(path, failure, body, onDelta, onDone, onError));
+// One line per turn in the log: what was asked, which models were lined up, how long it took, how it ended.
+function trackTurn(path) {
+  const kind = path.includes("ai-chats") ? "ai-send" : path.split("/").pop();
+  const started = Date.now();
+  const list = candidates();
+  logEvent("turn", `${kind} started`, { models: list.map(c => `${c.provider}/${c.model}`), browserCalled: list.filter(c => isBrowserSource(c.provider)).length });
+  return {
+    done: () => logEvent("turn", `${kind} finished`, { ms: Date.now() - started }),
+    failed: err => logEvent("turn-error", `${kind} failed: ${err.message}`, { ms: Date.now() - started }),
+  };
+}
+
+const turnStream = (path, failure, body, onDelta, onDone, onError) => {
+  const turn = trackTurn(path);
+  const done = evt => { turn.done(); return onDone(evt); };
+  const failed = err => { turn.failed(err); return onError(err); };
+  return usesBrowser()
+    ? runSegments(splitSegments(candidates()), (items, delta) => browserTurn(path, body, items, delta),
+      (items, delta) => serverTurn(path, body, items, delta), onDelta, done, failed)
+    : legacyStream(path, failure, body, onDelta, done, failed);
+};
+
+async function trackedMemoryUpdate(branchId) {
+  const started = Date.now();
+  logEvent("memory", "update started", { browserCalled: usesBrowser() });
+  try {
+    const result = await (usesBrowser() ? updateMemoryViaBrowser(branchId) : request("POST", `/branches/${branchId}/memory`));
+    logEvent("memory", "update finished", { ms: Date.now() - started });
+    return result;
+  } catch (err) {
+    logEvent("memory-error", `update failed: ${err.message}`, { ms: Date.now() - started });
+    throw err;
+  }
+}
 
 export const api = {
   // Auth
@@ -301,6 +339,12 @@ export const api = {
   restoreBookmark: (bmId) => request("POST", `/bookmarks/${bmId}/restore`),
   deleteBookmark: (bmId) => request("DELETE", `/bookmarks/${bmId}`),
 
+  // The app's own log and the debug key (see debugLog.js)
+  clearClientLog: () => request("DELETE", "/client-log"),
+  getDebugKey: () => request("GET", "/debug-key"),
+  createDebugKey: () => request("POST", "/debug-key"),
+  revokeDebugKey: () => request("DELETE", "/debug-key"),
+
   // Undo
   undo: (branchId) => request("POST", `/branches/${branchId}/undo`),
 
@@ -318,7 +362,7 @@ export const api = {
   editUserStream: (chatId, ...rest) => turnStream(`/chats/${chatId}/edit-user`, "Edit failed", ...rest),
 
   // Memory
-  updateMemory: (branchId) => (usesBrowser() ? updateMemoryViaBrowser(branchId) : request("POST", `/branches/${branchId}/memory`)),
+  updateMemory: trackedMemoryUpdate,
 
   // Streaming send
   sendStream: (chatId, ...rest) => turnStream(`/chats/${chatId}/send`, "Send failed", ...rest),
@@ -356,3 +400,15 @@ async function readStream(body, onDelta, onDone, onError) {
     }
   }
 }
+
+// Uploads the app's own log in small batches; quietly does nothing while signed out or offline.
+connectLog(async (device, events) => {
+  const authToken = localStorage.getItem("auth_token");
+  if (!authToken) throw new Error("not signed in");
+  const res = await fetch(`${BASE}/client-log`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-auth-token": authToken },
+    body: JSON.stringify({ device, events }),
+  });
+  if (!res.ok) throw new Error(`log upload failed (${res.status})`);
+});
