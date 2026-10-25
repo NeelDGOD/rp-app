@@ -30,6 +30,8 @@ STYLE  (tap Style button or type in { })
   {continue}         bot advances scene alone
   {narrator} text    third-person transition
   {as mood}          shift tone for one reply
+  (direction)        out of character: narrated in *asterisks*,
+                     not answered by the character
 
 DIRECTOR NOTE  (stays in effect until changed)
   {direct: text}     override behavior until cleared

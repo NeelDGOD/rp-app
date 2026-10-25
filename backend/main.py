@@ -548,6 +548,25 @@ Use inner italic thoughts naturally.
 Only output immersive roleplay text.
 """
 
+PARENTHESES = re.compile(r"\(([^()]{2,})\)")
+
+def ooc_direction(text: str) -> Optional[dict]:
+    """Text in (parentheses) is a direction to the writer, the usual roleplay habit for "out of character". It is not
+    something the user's character says, so the model is told to carry it out as narration in asterisks instead of
+    answering it as the character."""
+    directions = [d.strip() for d in PARENTHESES.findall(text or "") if d.strip()]
+    if not directions:
+        return None
+    quoted = " | ".join(f'"{d}"' for d in directions)
+    return {"role": "system", "content": (
+        "OUT-OF-CHARACTER DIRECTION\n"
+        "In the user's latest message, the text inside (parentheses) is a direction to you, the writer. It is not something the "
+        "user's character says and it is not addressed to your character. Carry it out as third-person narration written in "
+        "*asterisks*, for example *She leans against the counter, drumming her fingers.* Do not answer it as the character "
+        "speaking in the first person, and do not mention the parentheses or this note. "
+        f"Direction: {quoted}\n"
+        "If the message also has text outside the parentheses, respond to that normally, in character, as well.")}
+
 def sys_msg(bot_content: str) -> dict:
     return {"role": "system", "content": f"{bot_content}\n\n{CMD_RULES}"}
 
@@ -1164,6 +1183,10 @@ async def send_message(chat_id: str, data: SendMsg,
         override = {"role": "system", "content": f"COMMAND OVERRIDE\nCommands: {' | '.join(oneshot_cmds)}"}
         send_hist.append(override)
 
+    direction = ooc_direction(cleaned)
+    if direction:
+        send_hist.append(direction)
+
     send_hist.append({"role": "user", "content": cleaned})
     b["history"].append({"role": "user", "content": cleaned})
 
@@ -1214,6 +1237,10 @@ async def retry_message(chat_id: str, data: RetryMsg,
     send_hist = build_send_history(hist_base, parent["memory"])
     if parent["director_note"]:
         send_hist.append({"role": "system", "content": f"ONGOING DIRECTOR NOTE (stays in effect until the user changes or clears it): {parent['director_note']}"})
+    last_user = next((m["content"] for m in reversed(hist_base) if m["role"] == "user"), "")
+    direction = ooc_direction(last_user)
+    if direction:
+        send_hist.append(direction)
     if data.hint:
         send_hist.append({"role": "system", "content": f"RETRY DIRECTION: {data.hint}"})
 
@@ -1387,6 +1414,10 @@ async def edit_user_message(chat_id: str, data: EditUserMsg,
     send_hist = build_send_history(hist_base, parent["memory"])
     if parent["director_note"]:
         send_hist.append({"role": "system", "content": f"ONGOING DIRECTOR NOTE (stays in effect until the user changes or clears it): {parent['director_note']}"})
+
+    direction = ooc_direction(data.new_content)
+    if direction:
+        send_hist.append(direction)
 
     new_bid = str(uuid.uuid4()); n = ts()
 
