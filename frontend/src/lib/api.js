@@ -1,6 +1,6 @@
 import { ALL_PROVIDERS, PROVIDERS } from "./providers";
 import { activeRequest, CHAIN_KEY, describeChain, readChain } from "./chain";
-import { connectLog, logEvent } from "./debugLog";
+import { logEvent } from "./debugLog";
 import { ModelError, isBrowserSource, readSse, runSegments, splitSegments, streamCompletion, tryInOrder } from "./browserModels";
 
 export { PROVIDERS };
@@ -401,14 +401,3 @@ async function readStream(body, onDelta, onDone, onError) {
   }
 }
 
-// Uploads the app's own log in small batches; quietly does nothing while signed out or offline.
-connectLog(async (device, events) => {
-  const authToken = localStorage.getItem("auth_token");
-  if (!authToken) throw new Error("not signed in");
-  const res = await fetch(`${BASE}/client-log`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "x-auth-token": authToken },
-    body: JSON.stringify({ device, events }),
-  });
-  if (!res.ok) throw new Error(`log upload failed (${res.status})`);
-});
