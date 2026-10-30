@@ -1058,12 +1058,16 @@ def list_chats(user_id: str = Depends(require_user)):
 
 @app.post("/chats")
 def create_chat(data: ChatCreate, user_id: str = Depends(require_user)):
-    conn = get_db(); cid = str(uuid.uuid4()); bid = str(uuid.uuid4()); n = ts()
-    bot = get_bot(data.bot_id, conn, user_id)
-    init_hist = json.dumps([sys_msg(bot["content"])])
-    q(conn, "INSERT INTO chats VALUES (?,?,?,?,?,?)", (cid, data.name, data.bot_id, n, n, user_id))
-    q(conn, "INSERT INTO branches VALUES (?,?,?,?,?,?,?,?,?,?)", (bid, cid, "", 0, init_hist, "", 0, n, n, ""))
-    conn.commit(); conn.close()
+    cid = str(uuid.uuid4()); bid = str(uuid.uuid4()); n = ts()
+
+    def _create():
+        conn = get_db()
+        bot = get_bot(data.bot_id, conn, user_id)
+        init_hist = json.dumps([sys_msg(bot["content"])])
+        q(conn, "INSERT INTO chats VALUES (?,?,?,?,?,?)", (cid, data.name, data.bot_id, n, n, user_id))
+        q(conn, "INSERT INTO branches VALUES (?,?,?,?,?,?,?,?,?,?)", (bid, cid, "", 0, init_hist, "", 0, n, n, ""))
+        conn.commit(); conn.close()
+    with_db_retry(_create)
     return {"id": cid, "name": data.name, "bot_id": data.bot_id, "root_branch_id": bid, "created_at": n}
 
 @app.get("/chats/{chat_id}")

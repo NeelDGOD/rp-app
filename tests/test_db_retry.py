@@ -53,6 +53,23 @@ def test_the_schema_is_created_once_the_database_answers():
     assert calls["n"] == 3
 
 
+def test_creating_a_chat_rides_out_a_dropped_stream():
+    from harness import Api, FakeLLM
+    api = Api(load_backend("new"), FakeLLM())
+    bot_id = api.bot()["id"]
+    real, drops = api.mod.get_bot, {"left": 2}
+
+    def flaky_get_bot(*args, **kwargs):
+        if drops["left"]:
+            drops["left"] -= 1
+            raise ValueError("Hrana: `api error: stream not found: abc`")
+        return real(*args, **kwargs)
+    api.mod.get_bot = flaky_get_bot
+    chat = api.chat(bot_id)
+    assert drops["left"] == 0 and chat["root_branch_id"]
+    assert [c["id"] for c in api.c.get("/chats", headers=api.h()).json()] == [chat["id"]], "exactly one chat was created"
+
+
 def test_every_table_is_created_by_the_split_schema():
     mod = load_backend("new")
     conn = mod.get_db()
